@@ -40,13 +40,16 @@ every Telegram message already carries is the routing key, so there is no
 
 ```bash
 cp .env.example .env    # fill in token, your user id, group id
-npm install
-npm start
+pnpm install
+pnpm start
 ```
 
-Get your numeric user id from [@userinfobot](https://t.me/userinfobot). `npm start`
+Get your numeric user id from [@userinfobot](https://t.me/userinfobot). `pnpm start`
 reads `.env` if it's there; every setting is a plain environment variable, so
 exporting them instead works too.
+
+The repo pins pnpm via `packageManager`, but nothing here depends on it — npm or
+yarn work the same if you'd rather (`npm install && npm start`).
 
 ## Configuration
 
@@ -108,7 +111,7 @@ Claude edits files and runs shell commands unsupervised. The default
 ## Verifying it works
 
 ```bash
-npm run smoke
+pnpm smoke
 ```
 
 Drives the `SessionManager` against a real Claude session with a fake frontend
