@@ -29,12 +29,12 @@ frontend.onCommand('help', async (msg) => {
       '/all — every Claude session on this machine, brokered or not',
       '/history [n] — last n messages of this session',
       '/mode [name] — show or change this session’s permission mode',
-      '/model [name] — show or change this session’s model',
       '/stop — end this session (the transcript survives; the next message resumes it)',
       '/interrupt — stop what Claude is doing right now',
       '',
       'Any other slash command goes straight to Claude Code, so its own commands',
-      'work here: /usage (5-hour and weekly quota), /context, /cost, /compact.',
+      'work here: /model (lists and switches models), /usage (5-hour and weekly',
+      'quota), /context, /cost, /compact.',
       'Anything that is not a command is sent to Claude as a message.',
     ].join('\n'),
   );
@@ -148,26 +148,6 @@ frontend.onCommand('mode', async (msg, args) => {
 
   await sessions.setPermissionMode(msg.conversationId, mode);
   await frontend.sendText(msg.conversationId, `🔐 Permission mode: *${mode}*`);
-});
-
-frontend.onCommand('model', async (msg, args) => {
-  const wanted = args.trim();
-
-  if (!wanted) {
-    const entry = registry.get(msg.conversationId);
-    const current = entry?.model ?? `${config.model ?? 'the SDK default'} (broker default)`;
-    // Only a live session can tell us what this build actually offers, so don't
-    // print a list we made up.
-    const available = await sessions.supportedModels(msg.conversationId);
-    const list = available.length
-      ? `\n\n${available.map((m) => `• ${m}`).join('\n')}`
-      : '\n\n(Send a message first — the model list comes from the running session.)';
-    await frontend.sendText(msg.conversationId, `Model: *${current}*${list}`);
-    return;
-  }
-
-  await sessions.setModel(msg.conversationId, wanted);
-  await frontend.sendText(msg.conversationId, `🧠 Model: *${wanted}*`);
 });
 
 frontend.onCommand('interrupt', async (msg) => {

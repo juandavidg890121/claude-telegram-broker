@@ -50,20 +50,6 @@ export class SessionManager {
     await this.live.get(conversationId)?.query.setPermissionMode(mode);
   }
 
-  async setModel(conversationId: string, model: string): Promise<void> {
-    const entry = this.require(conversationId);
-    entry.model = model;
-    this.deps.registry.put(entry);
-    await this.live.get(conversationId)?.query.setModel(model);
-  }
-
-  /** Models this build of Claude Code actually offers. Needs a live session. */
-  async supportedModels(conversationId: string): Promise<string[]> {
-    const session = this.live.get(conversationId);
-    if (!session) return [];
-    const models = await session.query.supportedModels();
-    return models.map((m) => m.value ?? m.displayName);
-  }
 
 
   /** Register a conversation without starting Claude yet. */
@@ -119,8 +105,12 @@ export class SessionManager {
       prompt: input,
       options: {
         cwd: entry.cwd,
-        // Per-session overrides win over the broker-wide defaults.
-        model: entry.model ?? config.model,
+        // BROKER_MODEL is the model every (re)start of this session gets. A
+        // `/model` sent through the passthrough is per-process — Claude Code says
+        // "for this session only" and means the running one — so it does not
+        // survive /stop. Verified, not assumed.
+        model: config.model,
+        // /mode, on the other hand, is the broker's: no native command sets it.
         permissionMode: (entry.permissionMode as PermissionMode) ?? config.permissionMode,
         // Without these rules `canUseTool` is never called for Bash/Edit — the
         // permission flow only prompts when a rule says it must.

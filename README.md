@@ -142,16 +142,23 @@ Any slash command the broker doesn't recognise is passed straight through to
 Claude Code, so its commands work from Telegram unchanged — most usefully:
 
 ```
+/model      list the available models, or switch: /model sonnet
 /usage      5-hour and weekly quota, with the per-model breakdown
 /context    what's filling the context window
 /cost       what this session has cost
 /compact    compact the conversation
 ```
 
-The broker deliberately does **not** reimplement these. An earlier version had its
-own `/usage` built from `rate_limit_event` messages; it was strictly worse (no
-weekly window, no percentages) *and* it shadowed the real one. Same principle as
-the registry: don't keep a second copy of something Claude already tracks.
+The broker deliberately does **not** reimplement these. It briefly had its own
+`/usage` and `/model`; both were strictly worse than the real ones *and* shadowed
+them. Same principle as the registry: don't keep a second copy of something Claude
+already owns.
+
+One caveat worth knowing, because it surprised us: **`/model` does not survive
+`/stop`.** Claude Code means "for this session only" literally — the running
+process, not the saved transcript. On the next start the session goes back to
+`BROKER_MODEL`. `/mode` *does* persist, because the broker owns it (there is no
+native Claude Code command for permission mode) and writes it to the registry.
 
 ## Security
 

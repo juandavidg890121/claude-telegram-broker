@@ -11,9 +11,13 @@ export type Entry = {
   sessionId?: string;
   cwd: string;
   title: string;
-  /** Per-session overrides of the global defaults, set from Telegram. */
+  /**
+   * Set by /mode. There is no native Claude Code command for permission mode,
+   * so the broker owns it — and persists it so a resumed session keeps it.
+   * The model is deliberately *not* here: Claude Code's own /model handles that,
+   * and a second copy would fight it.
+   */
   permissionMode?: string;
-  model?: string;
 };
 
 export class Registry {
