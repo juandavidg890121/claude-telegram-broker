@@ -1,0 +1,24 @@
+{
+  "name": "claude-telegram-broker",
+  "version": "1.0.0",
+  "description": "Drive Claude Code sessions from Telegram: create, list, resume, and approve tool calls from your phone.",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "smoke": "tsx src/smoke.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.209",
+    "grammy": "^1.44.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  },
+  "type": "module",
+  "private": true
+}
