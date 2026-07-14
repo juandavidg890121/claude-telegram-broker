@@ -44,7 +44,40 @@ npm install
 npm start
 ```
 
-Get your numeric user id from [@userinfobot](https://t.me/userinfobot).
+Get your numeric user id from [@userinfobot](https://t.me/userinfobot). `npm start`
+reads `.env` if it's there; every setting is a plain environment variable, so
+exporting them instead works too.
+
+## Configuration
+
+| Variable | Default | What it does |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | — | **Required.** The token from @BotFather. |
+| `TELEGRAM_ALLOWED_USERS` | — | **Required.** Comma-separated Telegram user IDs. Everyone else is dropped silently. The broker refuses to start if it's empty. |
+| `TELEGRAM_GROUP_ID` | none | A forum-enabled group, so `/new` opens one topic per session. Without it you get one session per chat and `/new` reuses the current one. |
+| `BROKER_DEFAULT_CWD` | your home dir | The directory a session starts in when `/new` is given no path — so `/new` alone lands somewhere useful instead of `~`. Set it to wherever your repos live. It's also the cwd adopted when you message a conversation the broker has never seen. |
+| `BROKER_STATE_FILE` | `~/.claude-telegram-broker.json` | Where the conversation → session-id registry is written. Move it if you want to run two brokers side by side. |
+| `BROKER_MODEL` | the SDK's default | Model for spawned sessions, e.g. `claude-opus-4-8`. |
+| `BROKER_PERMISSION_MODE` | `default` | Baseline behaviour for tools **not** in `BROKER_ASK_TOOLS`. See below. |
+| `BROKER_ASK_TOOLS` | `Bash,Write,Edit,NotebookEdit` | Tools that **always** require an Allow/Deny confirmation in Telegram. |
+
+### How the two permission settings interact
+
+They are not alternatives — they cover different tools.
+
+`BROKER_ASK_TOOLS` is the allowlist of tools that always stop and ask you, no
+matter what. `BROKER_PERMISSION_MODE` decides what happens to *everything else*:
+
+| Mode | Tools outside `BROKER_ASK_TOOLS` |
+|---|---|
+| `default` | Standard rules; anything unmatched runs without prompting you |
+| `acceptEdits` | File edits are auto-accepted |
+| `plan` | Claude explores and proposes, but doesn't edit |
+| `bypassPermissions` | All checks skipped — but `BROKER_ASK_TOOLS` **still prompts** |
+
+The practical consequence: `BROKER_ASK_TOOLS` is the real gate, and
+`BROKER_PERMISSION_MODE` only tunes the background. Tightening the mode does not
+compensate for emptying the ask list.
 
 ## Commands
 
