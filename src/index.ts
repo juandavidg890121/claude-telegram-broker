@@ -1,4 +1,6 @@
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { statSync } from 'node:fs';
 import { getSessionMessages, listSessions } from '@anthropic-ai/claude-agent-sdk';
 import { config } from './config.js';
 import { Registry } from './registry.js';
@@ -31,8 +33,13 @@ frontend.onCommand('help', async (msg) => {
 });
 
 frontend.onCommand('new', async (msg, args) => {
-  const cwd = resolve(args.trim() || config.defaultCwd);
-  const title = cwd.split('/').filter(Boolean).pop() ?? 'session';
+  const { cwd, title } = parseNew(args);
+
+  // Claude starting in a directory that doesn't exist is a confusing way to
+  // fail, several turns later. Fail here instead.
+  if (!statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) {
+    throw new Error(`Not a directory: ${cwd}`);
+  }
 
   const conversationId = await frontend.createConversation(title, msg);
   sessions.register(conversationId, cwd, title);
@@ -50,6 +57,23 @@ frontend.onCommand('new', async (msg, args) => {
     `🟢 Session \`${title}\` ready in \`${cwd}\`. Send a message to start.${note}`,
   );
 });
+
+/**
+ * `/new` takes a path, a name, or both — `/new` alone, `/new my-thing`,
+ * `/new ~/code/repo`, `/new ~/code/repo my-thing`. Reading a bare word as a path
+ * (and silently starting Claude in a directory that doesn't exist) is the one
+ * behaviour nobody wants.
+ */
+function parseNew(args: string): { cwd: string; title: string } {
+  const [first, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+  const looksLikePath = first !== undefined && /^[/~.]/.test(first);
+
+  const cwd = resolve(
+    looksLikePath ? first.replace(/^~/, homedir()) : config.defaultCwd,
+  );
+  const name = (looksLikePath ? rest.join(' ') : args.trim()) || basename(cwd);
+  return { cwd, title: name };
+}
 
 frontend.onCommand('sessions', async (msg) => {
   const entries = registry.list();

@@ -25,12 +25,15 @@ export class TelegramFrontend implements Frontend {
     this.bot = new Bot(config.telegram.token);
     this.bot.on('message:text', (ctx) => this.handleText(ctx));
     this.bot.on('callback_query:data', (ctx) => this.handleCallback(ctx));
+    // Without this, any failed API call takes the whole broker down and every
+    // live session with it.
+    this.bot.catch((err) => console.error(`[telegram] ${err.message}`));
   }
 
   async start(): Promise<void> {
     // grammY's run/start only resolves on stop, so kick it off in the background.
     void this.bot.start({
-      onStart: (info) => {
+      onStart: async (info) => {
         console.log(`[telegram] polling as @${info.username}`);
         // With privacy mode on (the BotFather default) Telegram never delivers
         // ordinary group messages to the bot, so a topic looks dead with no
@@ -43,11 +46,48 @@ export class TelegramFrontend implements Frontend {
               '           the bot to the group (the change only applies on re-join).',
           );
         }
-        if (!config.telegram.groupId) {
-          console.warn('[telegram] TELEGRAM_GROUP_ID is unset: /new will not create topics.');
-        }
+        await this.checkGroup(info.id);
       },
     });
+  }
+
+  /**
+   * Everything that has to be true before /new can open a topic, checked once at
+   * startup. Each of these otherwise surfaces as an opaque 400 halfway through a
+   * command.
+   */
+  private async checkGroup(botId: number): Promise<void> {
+    const groupId = config.telegram.groupId;
+    if (!groupId) {
+      console.warn('[telegram] TELEGRAM_GROUP_ID is unset: /new cannot create topics.');
+      return;
+    }
+
+    try {
+      const chat = await this.bot.api.getChat(groupId);
+      if (!('is_forum' in chat) || !chat.is_forum) {
+        console.warn(
+          `[telegram] "${groupId}" is not a forum. Enable Topics in the group settings,` +
+            ' or /new has nowhere to put a session.',
+        );
+      }
+
+      const me = await this.bot.api.getChatMember(groupId, botId);
+      const canManageTopics = me.status === 'creator' || (me.status === 'administrator' && me.can_manage_topics);
+      if (!canManageTopics) {
+        console.warn(
+          `[telegram] the bot is "${me.status}" in this group, without Manage Topics.\n` +
+            '           Promote it to admin with that permission, or /new will fail.',
+        );
+      } else {
+        console.log('[telegram] group OK: forum + Manage Topics.');
+      }
+    } catch (error) {
+      console.error(
+        `[telegram] cannot reach group ${groupId}: ${error instanceof Error ? error.message : error}\n` +
+          '           Supergroup ids are negative (-100…). Check the bot is a member.',
+      );
+    }
   }
 
   async stop(): Promise<void> {
@@ -120,16 +160,23 @@ export class TelegramFrontend implements Frontend {
       text,
     };
 
-    if (text.startsWith('/')) {
-      const [word, ...rest] = text.slice(1).split(/\s+/);
-      const handler = this.commands.get(word.split('@')[0]);
-      if (handler) {
-        await handler(msg, rest.join(' '));
-        return;
+    // A throwing handler must not take the broker down with it — report it in
+    // the chat where the human can act on it.
+    try {
+      if (text.startsWith('/')) {
+        const [word, ...rest] = text.slice(1).split(/\s+/);
+        const handler = this.commands.get(word.split('@')[0]);
+        if (handler) {
+          await handler(msg, rest.join(' '));
+          return;
+        }
       }
+      await this.messageHandler?.(msg);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(`[telegram] handler failed: ${reason}`);
+      await this.sendText(msg.conversationId, `⚠️ ${reason}`).catch(() => {});
     }
-
-    await this.messageHandler?.(msg);
   }
 
   private async handleCallback(ctx: Filter<Context, 'callback_query:data'>): Promise<void> {

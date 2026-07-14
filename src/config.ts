@@ -7,6 +7,13 @@ function required(name: string): string {
   return value;
 }
 
+function normalizeGroupId(raw: string): string {
+  const id = raw.trim();
+  if (!id || id.startsWith('-')) return id;
+  console.warn(`[config] TELEGRAM_GROUP_ID=${id} is missing its leading '-'; using -${id}.`);
+  return `-${id}`;
+}
+
 export const config = {
   telegram: {
     token: required('TELEGRAM_BOT_TOKEN'),
@@ -17,8 +24,14 @@ export const config = {
         .map((s) => s.trim())
         .filter(Boolean),
     ),
-    /** Forum-enabled group where each topic is one session. Optional. */
-    groupId: process.env.TELEGRAM_GROUP_ID ?? '',
+    /**
+     * Forum-enabled group where each topic is one session.
+     *
+     * Supergroup ids are negative. Copying one without its minus sign yields a
+     * baffling `400: chat not found`, so absorb that here rather than make
+     * everyone rediscover it.
+     */
+    groupId: normalizeGroupId(process.env.TELEGRAM_GROUP_ID ?? ''),
   },
   /** Working directory a new session starts in when none is given. */
   defaultCwd: process.env.BROKER_DEFAULT_CWD ?? homedir(),
