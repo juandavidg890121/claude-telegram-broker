@@ -131,26 +131,27 @@ compensate for emptying the ask list.
 | `/history [n]` | Last `n` messages of this session's transcript |
 | `/mode [name]` | Show or change this session's permission mode. Persists, so it survives a restart and applies on resume. `BROKER_ASK_TOOLS` still prompts regardless — see below |
 | `/model [name]` | Show or change this session's model. With no argument it lists what the running session actually offers, rather than a list this repo made up |
-| `/usage` | This session's cost and tokens, plus whatever quota Claude has reported |
 | `/interrupt` | Stop what Claude is doing right now |
 | `/stop` | End the session process — the transcript survives and the next message resumes it |
 
 Anything that isn't a command is sent to Claude as a message.
 
-### What `/usage` can and cannot tell you
+### Claude Code's own commands work too
 
-Cost, tokens and turns are exact — the broker sums them from each turn's result.
+Any slash command the broker doesn't recognise is passed straight through to
+Claude Code, so its commands work from Telegram unchanged — most usefully:
 
-Quota is a different story: **the SDK has no way to ask for it.** There is no
-`getUsage()` on the `Query` object; Claude only *pushes* `rate_limit_event`
-messages as limits move, and the broker banks whichever windows go past. In
-practice the 5-hour window shows up and the weekly one often doesn't, and a
-percentage only appears once a window starts filling up. So `/usage` reports what
-Claude has actually said and admits when it has said nothing — rather than
-printing a confident zero.
+```
+/usage      5-hour and weekly quota, with the per-model breakdown
+/context    what's filling the context window
+/cost       what this session has cost
+/compact    compact the conversation
+```
 
-None of it appears at all on API-key, Bedrock or Vertex auth: these limits only
-exist for claude.ai subscriptions.
+The broker deliberately does **not** reimplement these. An earlier version had its
+own `/usage` built from `rate_limit_event` messages; it was strictly worse (no
+weekly window, no percentages) *and* it shadowed the real one. Same principle as
+the registry: don't keep a second copy of something Claude already tracks.
 
 ## Security
 

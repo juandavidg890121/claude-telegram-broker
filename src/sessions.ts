@@ -2,7 +2,6 @@ import {
   query,
   type PermissionMode,
   type Query,
-  type SDKRateLimitInfo,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { AsyncQueue } from './queue.js';
@@ -38,17 +37,8 @@ export const PERMISSION_MODES: PermissionMode[] = [
   'bypassPermissions',
 ];
 
-export type Cost = { turns: number; usd: number; input: number; output: number };
-
 export class SessionManager {
   private live = new Map<string, Live>();
-  private cost = new Map<string, Cost>();
-  /**
-   * Quota is account-wide, not per session, and there is no way to ask for it —
-   * the SDK only pushes `rate_limit_event` messages as they change. So keep the
-   * latest of each window as it goes past.
-   */
-  private rateLimits = new Map<string, SDKRateLimitInfo>();
 
   constructor(private readonly deps: SessionDeps) {}
 
@@ -75,13 +65,6 @@ export class SessionManager {
     return models.map((m) => m.value ?? m.displayName);
   }
 
-  costOf(conversationId: string): Cost | undefined {
-    return this.cost.get(conversationId);
-  }
-
-  quota(): SDKRateLimitInfo[] {
-    return [...this.rateLimits.values()];
-  }
 
   /** Register a conversation without starting Claude yet. */
   register(conversationId: string, cwd: string, title: string): Entry {
@@ -181,24 +164,8 @@ export class SessionManager {
           continue;
         }
 
-        // Quota is only ever pushed, never queryable — bank it as it goes past.
-        if (message.type === 'rate_limit_event') {
-          const info = message.rate_limit_info;
-          this.rateLimits.set(info.rateLimitType ?? 'unknown', info);
-          continue;
-        }
-
-        if (message.type === 'result') {
-          const running = this.cost.get(conversationId) ?? { turns: 0, usd: 0, input: 0, output: 0 };
-          this.cost.set(conversationId, {
-            turns: running.turns + 1,
-            usd: running.usd + message.total_cost_usd,
-            input: running.input + message.usage.input_tokens,
-            output: running.output + message.usage.output_tokens,
-          });
-          if (message.subtype !== 'success') {
-            await this.deps.emit(conversationId, `⚠️ Session ended: ${message.subtype}`);
-          }
+        if (message.type === 'result' && message.subtype !== 'success') {
+          await this.deps.emit(conversationId, `⚠️ Session ended: ${message.subtype}`);
         }
       }
     } catch (error) {
