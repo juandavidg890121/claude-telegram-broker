@@ -1,0 +1,14 @@
+{
+  "name": "claude-telegram-broker",
+  "description": "Run Claude Code from your phone. Ships the broker daemon plus commands to start, stop and diagnose it.",
+  "owner": {
+    "name": "Juan David Gomez"
+  },
+  "plugins": [
+    {
+      "name": "telegram-broker",
+      "source": "./",
+      "description": "Drive Claude Code sessions from Telegram: create sessions, talk to them, and approve tool calls from your phone."
+    }
+  ]
+}

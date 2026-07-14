@@ -1,0 +1,9 @@
+{
+  "name": "telegram-broker",
+  "description": "Run and manage the Telegram broker daemon that lets you drive Claude Code sessions from your phone: create sessions, talk to them, and approve tool calls from Telegram.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Juan David Gomez"
+  },
+  "license": "MIT"
+}

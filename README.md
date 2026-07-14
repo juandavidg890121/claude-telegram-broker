@@ -60,6 +60,36 @@ exporting them instead works too.
 The repo pins pnpm via `packageManager`, but nothing here depends on it — npm or
 yarn work the same if you'd rather (`npm install && npm start`).
 
+## Install as a Claude Code plugin
+
+The repo doubles as a single-plugin marketplace, so it installs from Claude Code:
+
+```
+/plugin marketplace add <this-repo-url>
+/plugin install telegram-broker@claude-telegram-broker
+```
+
+During development, skip the marketplace and load it from disk:
+
+```bash
+claude --plugin-dir /path/to/claude-telegram-broker
+```
+
+It gives you three commands inside any Claude Code session:
+
+| Command | What it does |
+|---|---|
+| `/telegram-broker:start` | Installs deps if needed, starts the daemon detached, and reports the startup checks (group reachable, privacy mode, Manage Topics) |
+| `/telegram-broker:status` | Whether it's running, what the log says, which sessions exist — and, if Telegram itself looks wrong, asks the Telegram API instead of guessing |
+| `/telegram-broker:stop` | SIGTERM, so live sessions close cleanly. Transcripts and the registry survive; the next start resumes each topic |
+
+**The plugin does not *contain* the broker — it manages it.** A plugin is loaded
+*inside* a Claude Code session, and the broker's whole job is to sit *above*
+sessions and supervise them; running it inside one would put it back in the trap
+this project exists to avoid (see [Why a broker](#why-a-broker)). So the daemon
+stays a separate long-lived process, and the plugin is how you install, launch
+and diagnose it.
+
 ## Configuration
 
 | Variable | Default | What it does |
