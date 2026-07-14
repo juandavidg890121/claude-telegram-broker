@@ -95,7 +95,7 @@ compensate for emptying the ask list.
 
 | Command | What it does |
 |---|---|
-| `/new [path]` | Start a session (opens a new topic if a forum group is set) |
+| `/new [--path <dir>] [name…]` | Start a session in a new topic. The path is a named parameter; everything else is the topic name, spaces and all. Without `--path` it starts in `BROKER_DEFAULT_CWD`; without a name the topic is named after the directory. |
 | `/sessions` | Sessions this broker manages |
 | `/all` | Every Claude session on this machine, brokered or not |
 | `/history [n]` | Last `n` messages of this session's transcript |

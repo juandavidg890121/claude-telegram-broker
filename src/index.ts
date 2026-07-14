@@ -21,7 +21,10 @@ frontend.onCommand('help', async (msg) => {
   await frontend.sendText(
     msg.conversationId,
     [
-      '/new [path] — start a session (new topic if a forum group is configured)',
+      '/new [--path <dir>] [name…] — start a session in a new topic.',
+      '    /new fix the login bug        → default directory, topic "fix the login bug"',
+      '    /new --path ~/code/repo       → topic "repo"',
+      '    /new --path ~/code/repo tests → topic "tests"',
       '/sessions — sessions this broker manages',
       '/all — every Claude session on this machine, brokered or not',
       '/history [n] — last n messages of this session',
@@ -59,20 +62,29 @@ frontend.onCommand('new', async (msg, args) => {
 });
 
 /**
- * `/new` takes a path, a name, or both — `/new` alone, `/new my-thing`,
- * `/new ~/code/repo`, `/new ~/code/repo my-thing`. Reading a bare word as a path
- * (and silently starting Claude in a directory that doesn't exist) is the one
- * behaviour nobody wants.
+ * `/new [--path <dir>] [name…]`
+ *
+ * The path is a named parameter and everything else is the session name. An
+ * earlier version guessed — a leading `/`, `~` or `.` meant "path", anything
+ * else meant "name" — which reads `/new fix the login bug` as a directory. No
+ * guessing here: only `--path` is a path, and a name may contain spaces.
  */
 function parseNew(args: string): { cwd: string; title: string } {
-  const [first, ...rest] = args.trim().split(/\s+/).filter(Boolean);
-  const looksLikePath = first !== undefined && /^[/~.]/.test(first);
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
 
-  const cwd = resolve(
-    looksLikePath ? first.replace(/^~/, homedir()) : config.defaultCwd,
-  );
-  const name = (looksLikePath ? rest.join(' ') : args.trim()) || basename(cwd);
-  return { cwd, title: name };
+  let path: string | undefined;
+  const nameParts: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === '--path' || tokens[i] === '-p') {
+      path = tokens[++i];
+      if (!path) throw new Error('--path needs a directory, e.g. /new --path ~/code/repo');
+      continue;
+    }
+    nameParts.push(tokens[i]);
+  }
+
+  const cwd = resolve((path ?? config.defaultCwd).replace(/^~(?=$|\/)/, homedir()));
+  return { cwd, title: nameParts.join(' ') || basename(cwd) };
 }
 
 frontend.onCommand('sessions', async (msg) => {
