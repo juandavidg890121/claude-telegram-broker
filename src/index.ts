@@ -33,9 +33,22 @@ frontend.onCommand('help', async (msg) => {
 frontend.onCommand('new', async (msg, args) => {
   const cwd = resolve(args.trim() || config.defaultCwd);
   const title = cwd.split('/').filter(Boolean).pop() ?? 'session';
+
   const conversationId = await frontend.createConversation(title, msg);
   sessions.register(conversationId, cwd, title);
-  await frontend.sendText(conversationId, `🟢 Session ready in \`${cwd}\`. Send a message to start.`);
+
+  // A frontend with nowhere to put a new thread hands back the conversation we
+  // were called from. Say so — silently reusing the current topic looks like
+  // success and is how you end up with two sessions fighting over one thread.
+  const reused = conversationId === msg.conversationId;
+  const note = reused
+    ? '\n⚠️ No new topic was created (TELEGRAM_GROUP_ID is unset), so this session lives in the current thread.'
+    : '';
+
+  await frontend.sendText(
+    conversationId,
+    `🟢 Session \`${title}\` ready in \`${cwd}\`. Send a message to start.${note}`,
+  );
 });
 
 frontend.onCommand('sessions', async (msg) => {

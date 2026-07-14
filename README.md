@@ -34,9 +34,18 @@ every Telegram message already carries is the routing key, so there is no
 ## Setup
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
-2. Create a Telegram **group with Topics enabled** and add the bot as admin
-   (needs *Manage Topics*). Optional — without it you get one session per chat.
-3. Configure and run:
+2. **Turn privacy mode off**: `/setprivacy` → pick your bot → **Disable**. Then
+   **remove the bot from the group and add it back** — the change only takes
+   effect on re-join. With privacy on, Telegram never delivers ordinary group
+   messages to the bot, so topics look dead with no error anywhere.
+3. Create a Telegram **group with Topics enabled** and add the bot as admin with
+   *Manage Topics*. Put its id in `TELEGRAM_GROUP_ID` — this is what makes
+   `/new` able to open a topic per session.
+
+   To find the id: start the broker and send `/help` in the group. Commands get
+   through even under privacy mode, and the broker logs
+   `[telegram] from <you> chat=-100… topic=…`. That `chat=-100…` is the id.
+4. Configure and run:
 
 ```bash
 cp .env.example .env    # fill in token, your user id, group id
@@ -57,7 +66,7 @@ yarn work the same if you'd rather (`npm install && npm start`).
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — | **Required.** The token from @BotFather. |
 | `TELEGRAM_ALLOWED_USERS` | — | **Required.** Comma-separated Telegram user IDs. Everyone else is dropped silently. The broker refuses to start if it's empty. |
-| `TELEGRAM_GROUP_ID` | none | A forum-enabled group, so `/new` opens one topic per session. Without it you get one session per chat and `/new` reuses the current one. |
+| `TELEGRAM_GROUP_ID` | none | **Required for the topic-per-session workflow** — without it `/new` cannot open a topic. Only omit it if you want the degraded mode: talk to the bot in a DM and get a single session for the whole chat. |
 | `BROKER_DEFAULT_CWD` | your home dir | The directory a session starts in when `/new` is given no path — so `/new` alone lands somewhere useful instead of `~`. Set it to wherever your repos live. It's also the cwd adopted when you message a conversation the broker has never seen. |
 | `BROKER_STATE_FILE` | `~/.claude-telegram-broker.json` | Where the conversation → session-id registry is written. Move it if you want to run two brokers side by side. |
 | `BROKER_MODEL` | the SDK's default | Model for spawned sessions, e.g. `claude-opus-4-8`. |

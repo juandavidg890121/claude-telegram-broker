@@ -30,7 +30,23 @@ export class TelegramFrontend implements Frontend {
   async start(): Promise<void> {
     // grammY's run/start only resolves on stop, so kick it off in the background.
     void this.bot.start({
-      onStart: (info) => console.log(`[telegram] polling as @${info.username}`),
+      onStart: (info) => {
+        console.log(`[telegram] polling as @${info.username}`);
+        // With privacy mode on (the BotFather default) Telegram never delivers
+        // ordinary group messages to the bot, so a topic looks dead with no
+        // error anywhere. Say so at startup rather than let it be debugged.
+        if (config.telegram.groupId && !info.can_read_all_group_messages) {
+          console.warn(
+            '[telegram] privacy mode is ON: this bot will NOT receive normal messages\n' +
+              '           in groups, only commands. Fix it in @BotFather:\n' +
+              '           /setprivacy -> pick this bot -> Disable, then REMOVE and RE-ADD\n' +
+              '           the bot to the group (the change only applies on re-join).',
+          );
+        }
+        if (!config.telegram.groupId) {
+          console.warn('[telegram] TELEGRAM_GROUP_ID is unset: /new will not create topics.');
+        }
+      },
     });
   }
 
@@ -86,9 +102,16 @@ export class TelegramFrontend implements Frontend {
 
   private async handleText(ctx: Filter<Context, 'message:text'>): Promise<void> {
     const userId = String(ctx.from?.id ?? '');
+    const where = `chat=${ctx.chat.id} topic=${ctx.message.message_thread_id ?? 0}`;
+
     // Gate on the sender, never the chat: in a group, the chat id says nothing
-    // about who is actually typing.
-    if (!config.telegram.allowedUsers.has(userId)) return;
+    // about who is actually typing. Log the drop — a silent one is impossible to
+    // tell apart from Telegram never delivering the message at all.
+    if (!config.telegram.allowedUsers.has(userId)) {
+      console.warn(`[telegram] dropped: user ${userId} not in TELEGRAM_ALLOWED_USERS (${where})`);
+      return;
+    }
+    console.log(`[telegram] from ${userId} ${where}`);
 
     const text = ctx.message.text;
     const msg: Inbound = {
