@@ -4,7 +4,7 @@ import { statSync } from 'node:fs';
 import { getSessionMessages, listSessions } from '@anthropic-ai/claude-agent-sdk';
 import { config } from './config.js';
 import { Registry } from './registry.js';
-import { SessionManager } from './sessions.js';
+import { PERMISSION_MODES, SessionManager } from './sessions.js';
 import { TelegramFrontend } from './telegram.js';
 import type { Frontend, Inbound } from './frontend.js';
 
@@ -28,6 +28,9 @@ frontend.onCommand('help', async (msg) => {
       '/sessions — sessions this broker manages',
       '/all — every Claude session on this machine, brokered or not',
       '/history [n] — last n messages of this session',
+      '/mode [name] — show or change this session’s permission mode',
+      '/model [name] — show or change this session’s model',
+      '/usage — this session’s cost, and your 5-hour and weekly quota',
       '/stop — end this session (the transcript survives; the next message resumes it)',
       '/interrupt — stop what Claude is doing right now',
       'Anything else is sent to Claude as a message.',
@@ -121,6 +124,103 @@ frontend.onCommand('history', async (msg, args) => {
     .join('\n');
   await frontend.sendText(msg.conversationId, body || 'Transcript is empty.');
 });
+
+frontend.onCommand('mode', async (msg, args) => {
+  const entry = registry.get(msg.conversationId);
+  const wanted = args.trim();
+
+  if (!wanted) {
+    const current = entry?.permissionMode ?? `${config.permissionMode} (broker default)`;
+    await frontend.sendText(
+      msg.conversationId,
+      `Permission mode: *${current}*\n\n` +
+        PERMISSION_MODES.map((m) => `• ${m}`).join('\n') +
+        `\n\nThis is the baseline for tools outside BROKER_ASK_TOOLS ` +
+        `(${config.askTools.join(', ')}), which always ask — even in bypassPermissions.`,
+    );
+    return;
+  }
+
+  const mode = PERMISSION_MODES.find((m) => m.toLowerCase() === wanted.toLowerCase());
+  if (!mode) throw new Error(`Unknown mode "${wanted}". One of: ${PERMISSION_MODES.join(', ')}`);
+
+  await sessions.setPermissionMode(msg.conversationId, mode);
+  await frontend.sendText(msg.conversationId, `🔐 Permission mode: *${mode}*`);
+});
+
+frontend.onCommand('model', async (msg, args) => {
+  const wanted = args.trim();
+
+  if (!wanted) {
+    const entry = registry.get(msg.conversationId);
+    const current = entry?.model ?? `${config.model ?? 'the SDK default'} (broker default)`;
+    // Only a live session can tell us what this build actually offers, so don't
+    // print a list we made up.
+    const available = await sessions.supportedModels(msg.conversationId);
+    const list = available.length
+      ? `\n\n${available.map((m) => `• ${m}`).join('\n')}`
+      : '\n\n(Send a message first — the model list comes from the running session.)';
+    await frontend.sendText(msg.conversationId, `Model: *${current}*${list}`);
+    return;
+  }
+
+  await sessions.setModel(msg.conversationId, wanted);
+  await frontend.sendText(msg.conversationId, `🧠 Model: *${wanted}*`);
+});
+
+frontend.onCommand('usage', async (msg) => {
+  const lines: string[] = [];
+
+  const cost = sessions.costOf(msg.conversationId);
+  lines.push('*This session*');
+  lines.push(
+    cost
+      ? `${cost.turns} turns · $${cost.usd.toFixed(4)} · ${cost.input} in / ${cost.output} out tokens`
+      : 'Nothing yet — the broker counts from the moment it started this session.',
+  );
+
+  // There is no way to *ask* for quota: the SDK has no getUsage(), only
+  // `rate_limit_event` messages pushed as limits move. So this reports what
+  // Claude has actually told us, and says so when it has told us nothing.
+  const quota = sessions.quota();
+  lines.push('\n*Quota*');
+  if (quota.length === 0) {
+    lines.push(
+      'Nothing reported yet. Send a message and ask again — quota only arrives\n' +
+        'as Claude pushes it. It never arrives at all on API-key or Bedrock/Vertex\n' +
+        'auth: these limits only exist for claude.ai subscriptions.',
+    );
+  } else {
+    let anyPercent = false;
+    for (const info of quota) {
+      const window = WINDOW[info.rateLimitType ?? ''] ?? info.rateLimitType ?? 'unknown';
+      const resets = info.resetsAt
+        ? new Date(info.resetsAt * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+        : 'unknown';
+      if (info.utilization !== undefined) {
+        anyPercent = true;
+        lines.push(`• ${window}: ${Math.round(info.utilization * 100)}% used · resets ${resets}`);
+      } else {
+        lines.push(`• ${window}: ${info.status} · resets ${resets}`);
+      }
+    }
+    if (!anyPercent) {
+      lines.push('\nClaude only sends a percentage once a window starts filling up.');
+    }
+    lines.push('Windows Claude has not reported are not listed — including the weekly one,\nwhich may only show up once it starts being consumed.');
+  }
+
+  await frontend.sendText(msg.conversationId, lines.join('\n'));
+});
+
+/** The SDK's window names are opaque; say what they actually mean. */
+const WINDOW: Record<string, string> = {
+  five_hour: 'Session (5h)',
+  seven_day: 'Weekly (7d)',
+  seven_day_opus: 'Weekly — Opus',
+  seven_day_sonnet: 'Weekly — Sonnet',
+  overage: 'Overage',
+};
 
 frontend.onCommand('interrupt', async (msg) => {
   await sessions.interrupt(msg.conversationId);

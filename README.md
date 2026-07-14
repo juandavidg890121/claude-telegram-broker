@@ -129,10 +129,28 @@ compensate for emptying the ask list.
 | `/sessions` | Sessions this broker manages |
 | `/all` | Every Claude session on this machine, brokered or not |
 | `/history [n]` | Last `n` messages of this session's transcript |
+| `/mode [name]` | Show or change this session's permission mode. Persists, so it survives a restart and applies on resume. `BROKER_ASK_TOOLS` still prompts regardless — see below |
+| `/model [name]` | Show or change this session's model. With no argument it lists what the running session actually offers, rather than a list this repo made up |
+| `/usage` | This session's cost and tokens, plus whatever quota Claude has reported |
 | `/interrupt` | Stop what Claude is doing right now |
 | `/stop` | End the session process — the transcript survives and the next message resumes it |
 
 Anything that isn't a command is sent to Claude as a message.
+
+### What `/usage` can and cannot tell you
+
+Cost, tokens and turns are exact — the broker sums them from each turn's result.
+
+Quota is a different story: **the SDK has no way to ask for it.** There is no
+`getUsage()` on the `Query` object; Claude only *pushes* `rate_limit_event`
+messages as limits move, and the broker banks whichever windows go past. In
+practice the 5-hour window shows up and the weekly one often doesn't, and a
+percentage only appears once a window starts filling up. So `/usage` reports what
+Claude has actually said and admits when it has said nothing — rather than
+printing a confident zero.
+
+None of it appears at all on API-key, Bedrock or Vertex auth: these limits only
+exist for claude.ai subscriptions.
 
 ## Security
 

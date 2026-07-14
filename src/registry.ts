@@ -11,6 +11,9 @@ export type Entry = {
   sessionId?: string;
   cwd: string;
   title: string;
+  /** Per-session overrides of the global defaults, set from Telegram. */
+  permissionMode?: string;
+  model?: string;
 };
 
 export class Registry {
