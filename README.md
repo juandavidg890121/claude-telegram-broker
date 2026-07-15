@@ -129,8 +129,7 @@ compensate for emptying the ask list.
 | `/sessions` | Sessions this broker manages |
 | `/all` | Every Claude session on this machine, brokered or not |
 | `/history [n]` | Last `n` messages of this session's transcript |
-| `/mode [name]` | Show or change this session's permission mode. Persists, so it survives a restart and applies on resume. `BROKER_ASK_TOOLS` still prompts regardless — see below |
-| `/model [name]` | Show or change this session's model. With no argument it lists what the running session actually offers, rather than a list this repo made up |
+| `/mode [name]` | Show or change this session's permission mode. Persists, so it survives a restart and applies on resume. `BROKER_ASK_TOOLS` still prompts regardless — see below. (Switching *model* is Claude Code's own `/model`, below.) |
 | `/interrupt` | Stop what Claude is doing right now |
 | `/stop` | End the session process — the transcript survives and the next message resumes it |
 
@@ -201,3 +200,9 @@ implementation of that one file — the session logic doesn't move.
 Note what the registry *doesn't* store: transcripts and the session list. Claude
 already keeps those on disk, and the SDK reads them (`listSessions`,
 `getSessionMessages`), so there's no second copy to drift.
+
+## Credits
+
+Author: **Juan David Gomez**. MIT licensed — see [LICENSE.md](LICENSE.md).
+
+Original idea and collaboration: **Daniel Leyva Ambrosio**.
