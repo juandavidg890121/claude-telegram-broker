@@ -15,10 +15,16 @@ Do this:
    `node_modules`, install dependencies there first (`pnpm install`, falling back
    to `npm install`).
 
-2. If `${CLAUDE_PLUGIN_ROOT}/.env` does not exist, stop and tell the user to copy
-   `.env.example` to `.env` and fill in `TELEGRAM_BOT_TOKEN`,
-   `TELEGRAM_ALLOWED_USERS` and `TELEGRAM_GROUP_ID`. Do not invent values, and
-   never print the contents of `.env` — it holds a bot token.
+2. Configuration comes from the environment. Two ways to provide it, and the
+   broker reads whichever is present:
+   - a `${CLAUDE_PLUGIN_ROOT}/.env` file, or
+   - variables already exported in the shell (`TELEGRAM_BOT_TOKEN`,
+     `TELEGRAM_ALLOWED_USERS`, `TELEGRAM_GROUP_ID`).
+
+   If neither is set — no `.env` **and** `TELEGRAM_BOT_TOKEN` is unset in the
+   environment — stop and tell the user to do one of the two (copy
+   `.env.example` to `.env`, or export the variables). Do not invent values, and
+   never print the contents of `.env` or the token — it is a secret.
 
 3. If a broker is already running (`pgrep -f "tsx.*src/index.ts"`), say so and
    stop. Two brokers on one bot token fight over `getUpdates` and Telegram will

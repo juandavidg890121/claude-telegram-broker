@@ -53,9 +53,28 @@ pnpm install
 pnpm start
 ```
 
-Get your numeric user id from [@userinfobot](https://t.me/userinfobot). `pnpm start`
-reads `.env` if it's there; every setting is a plain environment variable, so
-exporting them instead works too.
+Get your numeric user id from [@userinfobot](https://t.me/userinfobot).
+
+### `.env` or exported variables — either works
+
+Every setting is a plain environment variable read from `process.env`, and the
+`.env` file is a convenience, not a requirement (`pnpm start` loads it *if
+present* via `--env-file-if-exists`). So instead of a `.env` you can export the
+variables in the shell you launch from:
+
+```bash
+export TELEGRAM_BOT_TOKEN='123456:ABC...'
+export TELEGRAM_ALLOWED_USERS='123456789'
+export TELEGRAM_GROUP_ID='-1001234567890'
+pnpm start
+```
+
+This also works when the plugin's `/telegram-broker:start` launches the daemon:
+it runs in the shell Claude Code inherited, so anything exported there (including
+from your `~/.bashrc` / `~/.zshrc` or a systemd unit's `Environment=`) is picked
+up — verified with the detached `nohup` launch the skill uses. Exported values
+and a `.env` can coexist; the process environment wins for any key set in both,
+since `--env-file` does not overwrite a variable already in the environment.
 
 The repo pins pnpm via `packageManager`, but nothing here depends on it — npm or
 yarn work the same if you'd rather (`npm install && npm start`).
