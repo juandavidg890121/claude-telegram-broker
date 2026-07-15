@@ -266,3 +266,5 @@ already keeps those on disk, and the SDK reads them (`listSessions`,
 Author: **Juan David Gomez**. MIT licensed — see [LICENSE.md](LICENSE.md).
 
 Original idea and collaboration: **Daniel Leyva Ambrosio**.
+
+Privacy: the plugin runs locally and collects nothing — see [PRIVACY.md](PRIVACY.md).
