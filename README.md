@@ -87,7 +87,7 @@ yarn work the same if you'd rather (`npm install && npm start`).
 The repo doubles as a single-plugin marketplace, so it installs from Claude Code:
 
 ```
-/plugin marketplace add <this-repo-url>
+/plugin marketplace add juandavidg890121/claude-telegram-broker
 /plugin install telegram-broker@claude-telegram-broker
 ```
 
