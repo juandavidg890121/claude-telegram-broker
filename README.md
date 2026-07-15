@@ -45,7 +45,10 @@ every Telegram message already carries is the routing key, so there is no
    To find the id: start the broker and send `/help` in the group. Commands get
    through even under privacy mode, and the broker logs
    `[telegram] from <you> chat=-100… topic=…`. That `chat=-100…` is the id.
-4. Configure and run:
+4. Configure and run **from the cloned repo** — this is the development flow;
+   to run it as an installed Claude Code plugin instead, see
+   [Install as a Claude Code plugin](#install-as-a-claude-code-plugin), where the
+   `.env` and `node_modules` live under `${CLAUDE_PLUGIN_ROOT}` rather than here:
 
 ```bash
 cp .env.example .env    # fill in token, your user id, group id
@@ -88,6 +91,32 @@ The repo doubles as a single-plugin marketplace, so it installs from Claude Code
 /plugin install telegram-broker@claude-telegram-broker
 ```
 
+**Configuring a marketplace install.** Installing copies the plugin into Claude
+Code's own directory, and `${CLAUDE_PLUGIN_ROOT}` — where `/telegram-broker:start`
+looks for both `node_modules` and `.env` — points *there*, not at any repo you
+cloned. For a single-plugin marketplace like this one that resolves to:
+
+```
+~/.claude/plugins/marketplaces/claude-telegram-broker
+```
+
+Since `.env` is gitignored it is **not** carried along by the install, so any
+`.env` you filled in elsewhere is invisible to the installed copy. Give the
+broker its configuration one of two ways:
+
+- **Create `${CLAUDE_PLUGIN_ROOT}/.env`** — i.e.
+  `~/.claude/plugins/marketplaces/claude-telegram-broker/.env` — by copying
+  `.env.example` there and filling it in. Simplest, but a reinstall or update of
+  the plugin overwrites the directory, so you lose it and recreate it.
+- **Export the variables** (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS`,
+  `TELEGRAM_GROUP_ID`) from your `~/.bashrc` / `~/.zshrc`. The broker reads them
+  straight from `process.env`, so they survive reinstalls and need no file inside
+  the plugin directory. Preferred for a marketplace install.
+
+Dependencies you do **not** configure: `/telegram-broker:start` runs
+`pnpm install` (falling back to `npm install`) in `${CLAUDE_PLUGIN_ROOT}` on first
+launch if `node_modules` is missing.
+
 During development, skip the marketplace and load it from disk:
 
 ```bash
@@ -110,6 +139,18 @@ stays a separate long-lived process, and the plugin is how you install, launch
 and diagnose it.
 
 ## Configuration
+
+Every setting below is an environment variable. The broker reads them from
+`process.env`, so a `.env` file and shell-exported variables work the same and
+can coexist (see [`.env` or exported variables](#env-or-exported-variables--either-works)).
+Where the `.env` lives depends on how you run the broker:
+
+- **From source** — `.env` at the repo root, next to `package.json`.
+- **As an installed plugin** — `${CLAUDE_PLUGIN_ROOT}/.env`, i.e.
+  `~/.claude/plugins/marketplaces/claude-telegram-broker/.env`. Because that
+  directory is overwritten on reinstall, exporting the variables from your shell
+  is the sturdier option — see
+  [Configuring a marketplace install](#install-as-a-claude-code-plugin).
 
 | Variable | Default | What it does |
 |---|---|---|
