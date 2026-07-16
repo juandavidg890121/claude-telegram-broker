@@ -33,6 +33,23 @@ export const config = {
      */
     groupId: normalizeGroupId(process.env.TELEGRAM_GROUP_ID ?? ''),
   },
+  /**
+   * Voice-note transcription. Off unless BROKER_WHISPER_DIR points somewhere.
+   *
+   * Opt-in, and local. Claude has no audio input, so a voice note is useless
+   * without a transcription step — and every hosted transcription service would
+   * be a fourth party receiving your microphone, which is exactly what this
+   * project's PRIVACY.md says does not happen. whisper.cpp keeps that promise;
+   * the price is that you install it yourself, so nothing here assumes it is
+   * there.
+   */
+  audio: {
+    dir: process.env.BROKER_WHISPER_DIR,
+    /** Model filename inside that directory; otherwise the first ggml-*.bin found. */
+    model: process.env.BROKER_WHISPER_MODEL,
+    /** Spoken-language hint. 'auto' detects per message. */
+    language: process.env.BROKER_WHISPER_LANGUAGE ?? 'auto',
+  },
   /** Working directory a new session starts in when none is given. */
   defaultCwd: process.env.BROKER_DEFAULT_CWD ?? homedir(),
   /** Where the topic-to-session registry lives. */

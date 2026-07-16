@@ -33,6 +33,16 @@ you are already choosing to use:
 The plugin does not add any additional collection, sharing, or storage on top of
 those two.
 
+**Voice notes are transcribed on your machine, or not at all.** The easy way to
+support them would be a hosted speech-to-text API, and that would put a third
+party you did not choose in front of your microphone — for every voice note,
+including the ones where you are describing private work out loud. So the
+optional transcription runs a local `whisper.cpp` instead (see the README): the
+audio never leaves the machine, and the recording is deleted the moment it
+becomes text. Without it installed, voice notes are declined rather than sent
+somewhere. Only the resulting text reaches Anthropic, exactly as if you had typed
+it.
+
 ## Access control
 
 Only Telegram user IDs you list in `TELEGRAM_ALLOWED_USERS` can send messages to

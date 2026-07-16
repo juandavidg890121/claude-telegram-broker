@@ -1,10 +1,22 @@
 import { Bot, InlineKeyboard, type Context, type Filter } from 'grammy';
 import { randomBytes } from 'node:crypto';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { CommandHandler, Frontend, Inbound, PermissionAsk } from './frontend.js';
 import { config } from './config.js';
+import { chunkify } from './chunk.js';
+import { audioStatus, transcribe } from './audio.js';
 
-/** Telegram caps a message at 4096 characters. */
-const MAX_LEN = 4000;
+/** Photos land here for Claude's Read tool to pick up. Not under the /watch
+ *  mirror directory: those are keyed by session id and cleaned per session,
+ *  while a photo belongs to whichever conversation received it. */
+const PHOTOS_DIR = join(homedir(), '.claude', 'telegram_photos');
+
+/** Voice notes, deleted as soon as they are transcribed — the text is the
+ *  artefact, and a recording of your voice is not something to leave lying
+ *  around. */
+const AUDIO_DIR = join(homedir(), '.claude', 'telegram_audio');
 
 type Pending = { resolve: (allowed: boolean) => void };
 
@@ -24,6 +36,8 @@ export class TelegramFrontend implements Frontend {
   constructor() {
     this.bot = new Bot(config.telegram.token);
     this.bot.on('message:text', (ctx) => this.handleText(ctx));
+    this.bot.on('message:photo', (ctx) => this.handlePhoto(ctx));
+    this.bot.on(['message:voice', 'message:audio'], (ctx) => this.handleAudio(ctx));
     this.bot.on('callback_query:data', (ctx) => this.handleCallback(ctx));
     // Without this, any failed API call takes the whole broker down and every
     // live session with it.
@@ -179,6 +193,137 @@ export class TelegramFrontend implements Frontend {
     }
   }
 
+  /**
+   * Telegram delivers photos as `message:photo`, never `message:text`, so a
+   * text-only handler silently never fires for them — they look like they
+   * vanish rather than erroring.
+   *
+   * No multimodal wiring: the photo is saved and the session gets a text message
+   * pointing at the file, because Claude's own Read tool already handles images.
+   * That keeps this working identically for owned sessions and for /watch, where
+   * the relay carries text and nothing else.
+   */
+  private async handlePhoto(ctx: Filter<Context, 'message:photo'>): Promise<void> {
+    const userId = String(ctx.from?.id ?? '');
+    const where = `chat=${ctx.chat.id} topic=${ctx.message.message_thread_id ?? 0}`;
+
+    if (!config.telegram.allowedUsers.has(userId)) {
+      console.warn(`[telegram] dropped photo: user ${userId} not in TELEGRAM_ALLOWED_USERS (${where})`);
+      return;
+    }
+
+    const msg: Inbound = {
+      conversationId: `${ctx.chat.id}:${ctx.message.message_thread_id ?? 0}`,
+      userId,
+      text: '',
+    };
+
+    try {
+      // Telegram orders sizes smallest-first; the last one is the original.
+      const sizes = ctx.message.photo;
+      const file = await ctx.api.getFile(sizes[sizes.length - 1].file_id);
+      const response = await fetch(
+        `https://api.telegram.org/file/bot${config.telegram.token}/${file.file_path}`,
+      );
+      if (!response.ok) throw new Error(`download failed: ${response.status}`);
+
+      mkdirSync(PHOTOS_DIR, { recursive: true });
+      const ext = file.file_path?.split('.').pop() ?? 'jpg';
+      const localPath = join(PHOTOS_DIR, `${Date.now()}-${randomBytes(4).toString('hex')}.${ext}`);
+      writeFileSync(localPath, Buffer.from(await response.arrayBuffer()));
+      console.log(`[telegram] photo from ${userId} ${where} -> ${localPath}`);
+
+      const caption = ctx.message.caption?.trim();
+      msg.text =
+        `[Telegram photo saved to ${localPath} — use the Read tool to view it]` +
+        (caption ? `\n${caption}` : '');
+      await this.messageHandler?.(msg);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(`[telegram] photo handler failed: ${reason}`);
+      await this.sendText(msg.conversationId, `⚠️ Couldn't process that photo: ${reason}`).catch(() => {});
+    }
+  }
+
+  /**
+   * Voice notes and audio files.
+   *
+   * Claude has no audio input — the Messages API takes text, images and PDFs,
+   * and the model exposes an `image_input` capability with no audio equivalent —
+   * so a voice note is only useful once something turns it into text. That
+   * something is an optional local whisper.cpp (see audio.ts for why local).
+   *
+   * Every branch answers. Telegram delivers these as `message:voice` /
+   * `message:audio`, which no text handler matches, so the alternative to a
+   * reply is total silence — indistinguishable from a broken bot.
+   */
+  private async handleAudio(ctx: Context): Promise<void> {
+    const userId = String(ctx.from?.id ?? '');
+    if (!config.telegram.allowedUsers.has(userId)) {
+      console.warn(`[telegram] dropped audio: user ${userId} not in TELEGRAM_ALLOWED_USERS`);
+      return;
+    }
+
+    const conversationId = `${ctx.chat?.id}:${ctx.message?.message_thread_id ?? 0}`;
+    const status = audioStatus(config.audio.dir, config.audio.model);
+
+    if (status.state === 'disabled') {
+      await this.sendText(
+        conversationId,
+        `🔇 Audio is off. Claude can't hear a voice note — the API takes text, images ` +
+          `and PDFs only — so transcribing it first is opt-in: point BROKER_WHISPER_DIR ` +
+          `at a local whisper.cpp. See the README. Until then, type it or send a screenshot.`,
+      ).catch(() => {});
+      return;
+    }
+
+    if (status.state === 'incomplete') {
+      await this.sendText(
+        conversationId,
+        `🔇 Audio is on but not usable — missing from \`${status.dir}\`:\n` +
+          status.missing.map((m) => `• ${m}`).join('\n') +
+          `\n\nSee the README for where to get them.`,
+      ).catch(() => {});
+      return;
+    }
+
+    const msg: Inbound = { conversationId, userId, text: '' };
+    try {
+      const file = await ctx.api.getFile(
+        (ctx.message?.voice ?? ctx.message?.audio)!.file_id,
+      );
+      const response = await fetch(
+        `https://api.telegram.org/file/bot${config.telegram.token}/${file.file_path}`,
+      );
+      if (!response.ok) throw new Error(`download failed: ${response.status}`);
+
+      mkdirSync(AUDIO_DIR, { recursive: true });
+      const localPath = join(AUDIO_DIR, `${Date.now()}-${randomBytes(4).toString('hex')}.ogg`);
+      writeFileSync(localPath, Buffer.from(await response.arrayBuffer()));
+
+      const text = await transcribe(localPath, status.tools, config.audio.language);
+      rmSync(localPath, { force: true });
+
+      if (!text) {
+        await this.sendText(conversationId, '🔇 That came out empty — nothing recognisable in it.');
+        return;
+      }
+
+      console.log(`[telegram] audio from ${userId} -> "${text.slice(0, 60)}"`);
+      // Echo it back: transcription is a guess, and acting on a misheard
+      // instruction without ever showing what was heard is how you find out
+      // afterwards.
+      await this.sendText(conversationId, `🎙️ ${text}`);
+
+      msg.text = text;
+      await this.messageHandler?.(msg);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(`[telegram] audio handler failed: ${reason}`);
+      await this.sendText(conversationId, `⚠️ Couldn't transcribe that: ${reason}`).catch(() => {});
+    }
+  }
+
   private async handleCallback(ctx: Filter<Context, 'callback_query:data'>): Promise<void> {
     const userId = String(ctx.from.id);
     const [kind, id, verdict] = ctx.callbackQuery.data.split(':');
@@ -210,16 +355,3 @@ function split(conversationId: string): { chatId: number; threadId?: number } {
   return { chatId: Number(chat), threadId: threadId > 0 ? threadId : undefined };
 }
 
-function chunkify(text: string): string[] {
-  const chunks: string[] = [];
-  let rest = text;
-  while (rest.length > MAX_LEN) {
-    // Prefer a paragraph or line boundary so code blocks stay readable.
-    const cut = rest.lastIndexOf('\n', MAX_LEN);
-    const at = cut > MAX_LEN / 2 ? cut : MAX_LEN;
-    chunks.push(rest.slice(0, at));
-    rest = rest.slice(at);
-  }
-  if (rest.trim()) chunks.push(rest);
-  return chunks;
-}

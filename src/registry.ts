@@ -18,6 +18,17 @@ export type Entry = {
    * and a second copy would fight it.
    */
   permissionMode?: string;
+  /**
+   * Set by /watch. Marks this conversation as *relaying into* a session someone
+   * else drives (an interactive VS Code one), rather than one the broker owns.
+   *
+   * The broker never runs query() for a watched entry — not even as a fallback
+   * when the session looks gone. That refusal is the whole design: two writers
+   * on one session id corrupts the transcript, and liveness detection can only
+   * ever be a guess, so the guess is never allowed to authorise a takeover.
+   * See index.ts's onMessage, and /fork for the "branch it and drive it" path.
+   */
+  watch?: boolean;
 };
 
 export class Registry {
