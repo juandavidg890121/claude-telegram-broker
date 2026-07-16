@@ -1,6 +1,7 @@
+import { randomBytes } from 'node:crypto';
 import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { appendFileSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import {
   getSessionMessages,
   listSessions,
@@ -14,30 +15,51 @@ import type { Frontend, Inbound } from './frontend.js';
 
 /**
  * A mirrored session (see /resume) is watched, not owned. Its VS Code side
- * writes `watcher.json` on SessionStart and removes it on SessionEnd; while it's
- * there and the pid is alive, inbound messages are relayed to it via this inbox
- * file instead of driven through query() — the whole point is exactly one
- * process ever writes that session's transcript.
+ * writes `watcher.json` once at SessionStart (identity: session id + cwd) and
+ * removes it at SessionEnd (an immediate, clean "gone" signal). Because that
+ * hook is a one-shot subprocess, not something that lives as long as the
+ * session, it can't itself hold a pid or a lock for the session's lifetime —
+ * so liveness while running is tracked separately, by the same background
+ * poller that claims inbox messages (see the plugin's `mirror-poller` script)
+ * touching `heartbeat` every cycle. A crash stops the poller, the heartbeat
+ * goes stale within HEARTBEAT_STALE_MS, and the broker correctly falls back to
+ * driving the session headlessly — no pid to go stale-but-reused, no lock file
+ * whose holder outlived the process that mattered.
  */
 const MIRROR_DIR = join(homedir(), '.claude', 'telegram_mirror');
 const WATCHER_PATH = join(MIRROR_DIR, 'watcher.json');
-const INBOX_PATH = join(MIRROR_DIR, 'inbox.jsonl');
+const HEARTBEAT_PATH = join(MIRROR_DIR, 'heartbeat');
+const INBOX_DIR = join(MIRROR_DIR, 'inbox');
+const HEARTBEAT_STALE_MS = 5000;
 
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function readWatcher(): { pid: number; session_id: string; cwd: string } | undefined {
+function readWatcher(): { session_id: string; cwd: string } | undefined {
   try {
     return JSON.parse(readFileSync(WATCHER_PATH, 'utf8'));
   } catch {
     return undefined;
   }
+}
+
+function heartbeatFresh(): boolean {
+  try {
+    return Date.now() - statSync(HEARTBEAT_PATH).mtimeMs < HEARTBEAT_STALE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Maildir-style handoff: write to a temp name, then rename into place. Rename
+ * is atomic on the same volume on both POSIX and Windows, so the poller on the
+ * other end never sees a partially-written file, and claiming a message (its
+ * own rename, inbox/ -> processed/) can never race two readers onto one file.
+ */
+function writeInboxMessage(text: string): void {
+  mkdirSync(INBOX_DIR, { recursive: true });
+  const name = `${Date.now()}-${randomBytes(4).toString('hex')}.json`;
+  const tmp = join(INBOX_DIR, `.${name}.tmp`);
+  writeFileSync(tmp, JSON.stringify({ text, from: 'telegram', timestamp: new Date().toISOString() }));
+  renameSync(tmp, join(INBOX_DIR, name));
 }
 
 const registry = new Registry(config.stateFile);
@@ -305,6 +327,21 @@ frontend.onCommand('mode', async (msg, args) => {
   const entry = registry.get(msg.conversationId);
   const wanted = args.trim();
 
+  if (entry?.mirror) {
+    if (!wanted) {
+      await frontend.sendText(
+        msg.conversationId,
+        `This conversation watches a live session — permission mode is whatever ` +
+          `that session's own UI has set, not something this broker controls.`,
+      );
+      return;
+    }
+    throw new Error(
+      `Can't set permission mode here: this conversation watches a live session, ` +
+        `it doesn't drive it. Change it from that session's own UI instead.`,
+    );
+  }
+
   if (!wanted) {
     const current = entry?.permissionMode ?? `${config.permissionMode} (broker default)`;
     await frontend.sendText(
@@ -325,11 +362,25 @@ frontend.onCommand('mode', async (msg, args) => {
 });
 
 frontend.onCommand('interrupt', async (msg) => {
+  if (registry.get(msg.conversationId)?.mirror) {
+    throw new Error(
+      `Can't interrupt from here: this conversation watches a live session, it doesn't drive it.`,
+    );
+  }
   await sessions.interrupt(msg.conversationId);
   await frontend.sendText(msg.conversationId, '⏹️ Interrupted.');
 });
 
 frontend.onCommand('stop', async (msg) => {
+  if (registry.get(msg.conversationId)?.mirror) {
+    registry.remove(msg.conversationId);
+    await frontend.sendText(
+      msg.conversationId,
+      `🔴 Stopped watching. The live session itself is untouched — this only unlinks this topic. ` +
+        `/resume it again to relink.`,
+    );
+    return;
+  }
   await sessions.stop(msg.conversationId);
   await frontend.sendText(msg.conversationId, '🔴 Session stopped. Send a message to resume it.');
 });
@@ -342,13 +393,9 @@ frontend.onMessage(async (msg: Inbound) => {
 
   if (entry.mirror) {
     const watcher = readWatcher();
-    const live = watcher !== undefined && watcher.session_id === entry.sessionId && isPidAlive(watcher.pid);
+    const live = watcher !== undefined && watcher.session_id === entry.sessionId && heartbeatFresh();
     if (live) {
-      mkdirSync(MIRROR_DIR, { recursive: true });
-      appendFileSync(
-        INBOX_PATH,
-        JSON.stringify({ text: msg.text, from: 'telegram', timestamp: new Date().toISOString() }) + '\n',
-      );
+      writeInboxMessage(msg.text);
       return;
     }
     // Not alive right now: fall through and drive it headlessly below, same as
