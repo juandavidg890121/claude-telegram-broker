@@ -55,6 +55,9 @@ export const config = {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
+  /** Optional: transcribes voice notes via Groq's Whisper endpoint. Voice
+   * messages are just saved to disk (no transcript) when unset. */
+  groqApiKey: process.env.GROQ_API_KEY,
 };
 
 if (config.telegram.allowedUsers.size === 0) {

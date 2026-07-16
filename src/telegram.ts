@@ -1,12 +1,13 @@
 import { Bot, InlineKeyboard, type Context, type Filter } from 'grammy';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { CommandHandler, Frontend, Inbound, PermissionAsk } from './frontend.js';
 import { config } from './config.js';
 
 const PHOTOS_DIR = join(homedir(), '.claude', 'telegram_mirror', 'photos');
+const AUDIO_DIR = join(homedir(), '.claude', 'telegram_mirror', 'audio');
 
 /** Telegram caps a message at 4096 characters. */
 const MAX_LEN = 4000;
@@ -30,6 +31,7 @@ export class TelegramFrontend implements Frontend {
     this.bot = new Bot(config.telegram.token);
     this.bot.on('message:text', (ctx) => this.handleText(ctx));
     this.bot.on('message:photo', (ctx) => this.handlePhoto(ctx));
+    this.bot.on(['message:voice', 'message:audio'], (ctx) => this.handleVoice(ctx));
     this.bot.on('callback_query:data', (ctx) => this.handleCallback(ctx));
     // Without this, any failed API call takes the whole broker down and every
     // live session with it.
@@ -238,6 +240,78 @@ export class TelegramFrontend implements Frontend {
       console.error(`[telegram] photo handler failed: ${reason}`);
       await this.sendText(msg.conversationId, `⚠️ Couldn't process that photo: ${reason}`).catch(() => {});
     }
+  }
+
+  /**
+   * Voice notes (`message.voice`, OGG/Opus) and audio files (`message.audio`)
+   * both land here. Downloaded to disk the same way photos are, then
+   * transcribed via Groq's Whisper endpoint if GROQ_API_KEY is set -- Claude's
+   * Read tool has no audio path the way it does for images, so without a
+   * transcript the file would be saved but effectively invisible to Claude.
+   * Missing key or a failed transcription still delivers the file path, just
+   * without text -- never drops the message outright.
+   */
+  private async handleVoice(ctx: Filter<Context, 'message:voice' | 'message:audio'>): Promise<void> {
+    const userId = String(ctx.from?.id ?? '');
+    const where = `chat=${ctx.chat.id} topic=${ctx.message.message_thread_id ?? 0}`;
+
+    if (!config.telegram.allowedUsers.has(userId)) {
+      console.warn(`[telegram] dropped audio: user ${userId} not in TELEGRAM_ALLOWED_USERS (${where})`);
+      return;
+    }
+
+    const msg: Inbound = {
+      conversationId: `${ctx.chat.id}:${ctx.message.message_thread_id ?? 0}`,
+      userId,
+      text: '',
+    };
+
+    try {
+      const media = ctx.message.voice ?? ctx.message.audio;
+      if (!media) throw new Error('no voice/audio payload on message');
+      const file = await ctx.api.getFile(media.file_id);
+      const url = `https://api.telegram.org/file/bot${config.telegram.token}/${file.file_path}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`download failed: ${res.status}`);
+      const bytes = Buffer.from(await res.arrayBuffer());
+
+      mkdirSync(AUDIO_DIR, { recursive: true });
+      const ext = file.file_path?.split('.').pop() ?? 'oga';
+      const localPath = join(AUDIO_DIR, `${Date.now()}-${randomBytes(4).toString('hex')}.${ext}`);
+      writeFileSync(localPath, bytes);
+      console.log(`[telegram] audio from ${userId} ${where} -> ${localPath}`);
+
+      const caption = 'caption' in ctx.message ? ctx.message.caption?.trim() : undefined;
+      const transcript = await this.transcribeAudio(localPath).catch((error) => {
+        console.error(`[telegram] transcription failed: ${error instanceof Error ? error.message : error}`);
+        return null;
+      });
+
+      msg.text = transcript
+        ? `[Telegram voice message, transcribed]\n${transcript}`
+        : `[Telegram voice message saved to ${localPath} -- no transcript available]`;
+      if (caption) msg.text += `\n${caption}`;
+      await this.messageHandler?.(msg);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(`[telegram] audio handler failed: ${reason}`);
+      await this.sendText(msg.conversationId, `⚠️ Couldn't process that voice message: ${reason}`).catch(() => {});
+    }
+  }
+
+  private async transcribeAudio(localPath: string): Promise<string | null> {
+    if (!config.groqApiKey) return null;
+    const form = new FormData();
+    form.append('file', new Blob([readFileSync(localPath)]), 'audio.oga');
+    form.append('model', 'whisper-large-v3-turbo');
+    const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${config.groqApiKey}` },
+      body: form,
+    });
+    if (!res.ok) throw new Error(`Groq transcription failed: ${res.status} ${await res.text()}`);
+    const data = (await res.json()) as { text?: string };
+    return data.text?.trim() || null;
   }
 
   private async handleCallback(ctx: Filter<Context, 'callback_query:data'>): Promise<void> {

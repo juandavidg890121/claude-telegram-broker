@@ -162,6 +162,7 @@ Where the `.env` lives depends on how you run the broker:
 | `BROKER_MODEL` | the SDK's default | Model for spawned sessions, e.g. `claude-opus-4-8`. |
 | `BROKER_PERMISSION_MODE` | `default` | Baseline behaviour for tools **not** in `BROKER_ASK_TOOLS`. See below. |
 | `BROKER_ASK_TOOLS` | `Bash,Write,Edit,NotebookEdit` | Tools that **always** require an Allow/Deny confirmation in Telegram. |
+| `GROQ_API_KEY` | unset | Transcribes voice notes/audio files via Groq's Whisper endpoint. Unset means audio is saved to disk but sent to Claude without a transcript. |
 
 ### How the two permission settings interact
 
@@ -198,7 +199,15 @@ Anything that isn't a command is sent to Claude as a message. Photos work too:
 send one (with or without a caption) and the broker downloads it, saves it
 locally, and tells Claude where it landed — Claude's own `Read` tool already
 handles images, so no multimodal wiring was needed to make this work end to
-end. Audio/voice messages aren't handled yet.
+end.
+
+Voice notes and audio files work too: the broker downloads the file the same
+way, then transcribes it via Groq's Whisper endpoint (`GROQ_API_KEY`, see
+below) and sends Claude the transcript as plain text — unlike images, Claude's
+`Read` tool has no audio path, so without a transcript the file would be saved
+but invisible to Claude. If `GROQ_API_KEY` is unset or the transcription call
+fails, the file is still saved and the message still goes through, just
+without a transcript.
 
 ### Watching a live session
 
