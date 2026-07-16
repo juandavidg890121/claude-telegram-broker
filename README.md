@@ -187,7 +187,7 @@ compensate for emptying the ask list.
 |---|---|
 | `/new [--path <dir>] [name…]` | Start a session in a new topic. The path is a named parameter; everything else is the topic name, spaces and all. Without `--path` it starts in `BROKER_DEFAULT_CWD`; without a name the topic is named after the directory. |
 | `/sessions` | Sessions this broker manages |
-| `/all` | Every Claude session on this machine, brokered or not |
+| `/all [n] [--offset k] [--all]` | Every Claude session on this machine, brokered or not — grouped by project, newest first, each with its id, age and git branch. Defaults to the 30 most recent; `n` asks for a different count, `--offset k` pages through the rest, and `--all` dumps every one, split across as many messages as it takes. Each reply says which slice of the total it's showing, so a truncated list can't look like the whole set. Includes programmatic sessions (the broker's own included), which Claude Code's own session picker hides. |
 | `/history [n]` | Last `n` messages of this session's transcript |
 | `/mode [name]` | Show or change this session's permission mode. Persists, so it survives a restart and applies on resume. `BROKER_ASK_TOOLS` still prompts regardless — see below. (Switching *model* is Claude Code's own `/model`, below.) |
 | `/interrupt` | Stop what Claude is doing right now |

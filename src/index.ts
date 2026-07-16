@@ -1,7 +1,11 @@
 import { basename, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { statSync } from 'node:fs';
-import { getSessionMessages, listSessions } from '@anthropic-ai/claude-agent-sdk';
+import {
+  getSessionMessages,
+  listSessions,
+  type SDKSessionInfo,
+} from '@anthropic-ai/claude-agent-sdk';
 import { config } from './config.js';
 import { Registry } from './registry.js';
 import { PERMISSION_MODES, SessionManager } from './sessions.js';
@@ -26,7 +30,11 @@ frontend.onCommand('help', async (msg) => {
       '    /new --path ~/code/repo       → topic "repo"',
       '    /new --path ~/code/repo tests → topic "tests"',
       '/sessions — sessions this broker manages',
-      '/all — every Claude session on this machine, brokered or not',
+      '/all [n] [--offset k] [--all] — every Claude session on this machine, brokered or not',
+      `    /all              → the ${ALL_PAGE} most recent, grouped by project`,
+      '    /all 50           → the 50 most recent',
+      `    /all --offset ${ALL_PAGE}    → the next page`,
+      '    /all --all        → all of them, across several messages',
       '/history [n] — last n messages of this session',
       '/mode [name] — show or change this session’s permission mode',
       '/stop — end this session (the transcript survives; the next message resumes it)',
@@ -102,15 +110,108 @@ frontend.onCommand('sessions', async (msg) => {
   await frontend.sendText(msg.conversationId, body);
 });
 
-frontend.onCommand('all', async (msg) => {
+const ALL_PAGE = 30;
+
+frontend.onCommand('all', async (msg, args) => {
+  const { limit, offset } = parseAll(args);
+
   // Claude already keeps its own session index on disk — read it rather than
-  // maintaining a second, drift-prone copy.
-  const all = await listSessions({ limit: 15 });
-  const body = all.length
-    ? all.map((s) => `• ${s.sessionId}\n  ${s.summary ?? '(no summary)'}`).join('\n')
-    : 'No sessions found on this machine.';
-  await frontend.sendText(msg.conversationId, body);
+  // maintaining a second, drift-prone copy. Listing unpaginated and slicing
+  // here costs one directory scan and is what makes an honest "of N" possible;
+  // asking the SDK for a page can only ever report the page.
+  const all = await listSessions();
+  if (!all.length) {
+    await frontend.sendText(msg.conversationId, 'No sessions found on this machine.');
+    return;
+  }
+
+  const page = all.slice(offset, offset + limit);
+  if (!page.length) {
+    await frontend.sendText(
+      msg.conversationId,
+      `Offset ${offset} is past the end — there are ${all.length} sessions.`,
+    );
+    return;
+  }
+
+  const shown = `Sessions ${offset + 1}–${offset + page.length} of ${all.length}`;
+  const next = offset + page.length;
+  const footer =
+    next < all.length
+      ? `\n\n${all.length - next} more. Next: /all --offset ${next}  ·  everything: /all --all`
+      : '';
+
+  await frontend.sendText(msg.conversationId, `${shown}\n\n${groupByProject(page)}${footer}`);
 });
+
+/**
+ * `/all [n] [--offset k] [--all]`
+ *
+ * Long output is not a reason to truncate here: sendText already splits at
+ * Telegram's message cap, so `--all` genuinely means all.
+ */
+function parseAll(args: string): { limit: number; offset: number } {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+
+  let limit: number | undefined;
+  let offset = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token === '--all' || token === '-a') {
+      limit = Number.POSITIVE_INFINITY;
+      continue;
+    }
+    if (token === '--offset' || token === '-o') {
+      offset = Number(tokens[++i]);
+      if (!Number.isInteger(offset) || offset < 0) {
+        throw new Error('--offset needs a whole number, e.g. /all --offset 30');
+      }
+      continue;
+    }
+    const n = Number(token);
+    if (!Number.isInteger(n) || n <= 0) {
+      throw new Error(`Unexpected "${token}". Usage: /all [n] [--offset k] [--all]`);
+    }
+    limit = n;
+  }
+
+  return { limit: limit ?? ALL_PAGE, offset };
+}
+
+/**
+ * Sessions come back newest-first across every project at once, which reads as
+ * noise. Group them by directory, keeping projects ordered by their most recent
+ * session so the top of the message is still what you touched last.
+ */
+function groupByProject(sessions: SDKSessionInfo[]): string {
+  const byProject = new Map<string, SDKSessionInfo[]>();
+  for (const session of sessions) {
+    const key = session.cwd ?? '(unknown directory)';
+    const bucket = byProject.get(key);
+    if (bucket) bucket.push(session);
+    else byProject.set(key, [session]);
+  }
+
+  return [...byProject]
+    .map(([cwd, group]) => {
+      const lines = group.map((s) => {
+        // Outside a checked-out branch the SDK reports a literal "HEAD", which
+        // is noise on the majority of rows rather than information.
+        const branch = s.gitBranch && s.gitBranch !== 'HEAD' ? ` · ${s.gitBranch}` : '';
+        return `• ${s.summary || '(no summary)'}\n  ${s.sessionId}\n  ${ago(s.lastModified)}${branch}`;
+      });
+      return `📁 ${cwd} (${group.length})\n${lines.join('\n')}`;
+    })
+    .join('\n\n');
+}
+
+function ago(timestamp: number): string {
+  const minutes = Math.round((Date.now() - timestamp) / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
 
 frontend.onCommand('history', async (msg, args) => {
   const entry = registry.get(msg.conversationId);
