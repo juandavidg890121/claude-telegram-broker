@@ -1,6 +1,6 @@
-import { basename, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { statSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import {
   getSessionMessages,
   listSessions,
@@ -11,6 +11,34 @@ import { Registry } from './registry.js';
 import { PERMISSION_MODES, SessionManager } from './sessions.js';
 import { TelegramFrontend } from './telegram.js';
 import type { Frontend, Inbound } from './frontend.js';
+
+/**
+ * A mirrored session (see /resume) is watched, not owned. Its VS Code side
+ * writes `watcher.json` on SessionStart and removes it on SessionEnd; while it's
+ * there and the pid is alive, inbound messages are relayed to it via this inbox
+ * file instead of driven through query() — the whole point is exactly one
+ * process ever writes that session's transcript.
+ */
+const MIRROR_DIR = join(homedir(), '.claude', 'telegram_mirror');
+const WATCHER_PATH = join(MIRROR_DIR, 'watcher.json');
+const INBOX_PATH = join(MIRROR_DIR, 'inbox.jsonl');
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readWatcher(): { pid: number; session_id: string; cwd: string } | undefined {
+  try {
+    return JSON.parse(readFileSync(WATCHER_PATH, 'utf8'));
+  } catch {
+    return undefined;
+  }
+}
 
 const registry = new Registry(config.stateFile);
 const frontend: Frontend = new TelegramFrontend();
@@ -29,6 +57,11 @@ frontend.onCommand('help', async (msg) => {
       '    /new fix the login bug        → default directory, topic "fix the login bug"',
       '    /new --path ~/code/repo       → topic "repo"',
       '    /new --path ~/code/repo tests → topic "tests"',
+      '/resume <session-id> --path <dir> [name…] — watch an existing Claude',
+      '    session (not one this broker started) by id. Find ids with /all.',
+      '    While it\'s alive elsewhere (VS Code, another terminal), messages here',
+      '    relay into it — one process, no corruption. While it\'s closed, messages',
+      '    fall back to resuming it headless.',
       '/sessions — sessions this broker manages',
       '/all [n] [--offset k] [--all] — every Claude session on this machine, brokered or not',
       `    /all              → the ${ALL_PAGE} most recent, grouped by project`,
@@ -99,6 +132,46 @@ function parseNew(args: string): { cwd: string; title: string } {
   const cwd = resolve((path ?? config.defaultCwd).replace(/^~(?=$|\/)/, homedir()));
   return { cwd, title: nameParts.join(' ') || basename(cwd) };
 }
+
+frontend.onCommand('resume', async (msg, args) => {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const sessionId = tokens.shift();
+  if (!sessionId) {
+    throw new Error(
+      '/resume <session-id> --path <dir> [name…] — find ids with /all.\n' +
+        'The directory is required: the broker has no way to look up where an ' +
+        'arbitrary session originally ran.',
+    );
+  }
+
+  const { cwd, title } = parseNew(tokens.join(' '));
+  if (!tokens.includes('--path') && !tokens.includes('-p')) {
+    throw new Error('/resume needs --path <dir> — the directory that session originally ran in.');
+  }
+  if (!statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) {
+    throw new Error(`Not a directory: ${cwd}`);
+  }
+
+  const resolvedTitle = title === basename(cwd) ? sessionId.slice(0, 8) : title;
+  const conversationId = await frontend.createConversation(resolvedTitle, msg);
+  const entry = sessions.register(conversationId, cwd, resolvedTitle);
+  entry.sessionId = sessionId;
+  entry.mirror = true;
+  registry.put(entry);
+
+  const reused = conversationId === msg.conversationId;
+  const note = reused
+    ? '\n⚠️ No new topic was created (TELEGRAM_GROUP_ID is unset), so this session lives in the current thread.'
+    : '';
+
+  await frontend.sendText(
+    conversationId,
+    `🟢 Watching \`${sessionId}\` in \`${cwd}\`.${note}\n` +
+      `While that session is alive (its own watcher marker present), messages here are relayed ` +
+      `into it — no second Claude process, no corruption. If it's closed, messages fall back to ` +
+      `resuming it headless instead.`,
+  );
+});
 
 frontend.onCommand('sessions', async (msg) => {
   const entries = registry.list();
@@ -262,11 +335,27 @@ frontend.onCommand('stop', async (msg) => {
 });
 
 frontend.onMessage(async (msg: Inbound) => {
-  if (!registry.get(msg.conversationId)) {
-    // First contact in a conversation we've never seen: adopt it with defaults
-    // so the user can just start talking.
-    sessions.register(msg.conversationId, config.defaultCwd, 'default');
+  let entry = registry.get(msg.conversationId);
+  // First contact in a conversation we've never seen: adopt it with defaults so
+  // the user can just start talking.
+  entry ??= sessions.register(msg.conversationId, config.defaultCwd, 'default');
+
+  if (entry.mirror) {
+    const watcher = readWatcher();
+    const live = watcher !== undefined && watcher.session_id === entry.sessionId && isPidAlive(watcher.pid);
+    if (live) {
+      mkdirSync(MIRROR_DIR, { recursive: true });
+      appendFileSync(
+        INBOX_PATH,
+        JSON.stringify({ text: msg.text, from: 'telegram', timestamp: new Date().toISOString() }) + '\n',
+      );
+      return;
+    }
+    // Not alive right now: fall through and drive it headlessly below, same as
+    // any broker-owned conversation. Safe because nothing else can be writing
+    // to it while its watcher is gone.
   }
+
   await sessions.send(msg.conversationId, msg.text);
 });
 

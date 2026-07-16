@@ -18,6 +18,14 @@ export type Entry = {
    * and a second copy would fight it.
    */
   permissionMode?: string;
+  /**
+   * Set by /resume. Marks this conversation as bound to a session this broker
+   * did not spawn (e.g. an interactive VS Code session) rather than one it owns
+   * outright. While that session is alive, messages are relayed to it instead of
+   * driven through query() — two writers on one session id corrupts it. See
+   * index.ts's onMessage for the liveness check this gates.
+   */
+  mirror?: boolean;
 };
 
 export class Registry {
