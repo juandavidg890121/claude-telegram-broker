@@ -1,7 +1,12 @@
 import { Bot, InlineKeyboard, type Context, type Filter } from 'grammy';
 import { randomBytes } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { CommandHandler, Frontend, Inbound, PermissionAsk } from './frontend.js';
 import { config } from './config.js';
+
+const PHOTOS_DIR = join(homedir(), '.claude', 'telegram_mirror', 'photos');
 
 /** Telegram caps a message at 4096 characters. */
 const MAX_LEN = 4000;
@@ -24,6 +29,7 @@ export class TelegramFrontend implements Frontend {
   constructor() {
     this.bot = new Bot(config.telegram.token);
     this.bot.on('message:text', (ctx) => this.handleText(ctx));
+    this.bot.on('message:photo', (ctx) => this.handlePhoto(ctx));
     this.bot.on('callback_query:data', (ctx) => this.handleCallback(ctx));
     // Without this, any failed API call takes the whole broker down and every
     // live session with it.
@@ -176,6 +182,61 @@ export class TelegramFrontend implements Frontend {
       const reason = error instanceof Error ? error.message : String(error);
       console.error(`[telegram] handler failed: ${reason}`);
       await this.sendText(msg.conversationId, `⚠️ ${reason}`).catch(() => {});
+    }
+  }
+
+  /**
+   * Telegram delivers photos as `message:photo`, never `message:text` -- a
+   * plain `bot.on('message:text', ...)` handler silently never fires for them,
+   * which is why photos looked like they vanished rather than erroring.
+   *
+   * No multimodal wiring here: the photo is downloaded to disk and the human
+   * (or the mirrored session, via the same relay path as text) gets a plain
+   * text message pointing at the file. Claude's own Read tool already handles
+   * images, so this is the smallest thing that actually works end to end,
+   * for both broker-owned sessions and mirrored ones.
+   */
+  private async handlePhoto(ctx: Filter<Context, 'message:photo'>): Promise<void> {
+    const userId = String(ctx.from?.id ?? '');
+    const where = `chat=${ctx.chat.id} topic=${ctx.message.message_thread_id ?? 0}`;
+
+    if (!config.telegram.allowedUsers.has(userId)) {
+      console.warn(`[telegram] dropped photo: user ${userId} not in TELEGRAM_ALLOWED_USERS (${where})`);
+      return;
+    }
+
+    const msg: Inbound = {
+      conversationId: `${ctx.chat.id}:${ctx.message.message_thread_id ?? 0}`,
+      userId,
+      text: '',
+    };
+
+    try {
+      // Largest size is last in the array.
+      const sizes = ctx.message.photo;
+      const fileId = sizes[sizes.length - 1].file_id;
+      const file = await ctx.api.getFile(fileId);
+      const url = `https://api.telegram.org/file/bot${config.telegram.token}/${file.file_path}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`download failed: ${res.status}`);
+      const bytes = Buffer.from(await res.arrayBuffer());
+
+      mkdirSync(PHOTOS_DIR, { recursive: true });
+      const ext = file.file_path?.split('.').pop() ?? 'jpg';
+      const localPath = join(PHOTOS_DIR, `${Date.now()}-${randomBytes(4).toString('hex')}.${ext}`);
+      writeFileSync(localPath, bytes);
+
+      const caption = ctx.message.caption?.trim();
+      console.log(`[telegram] photo from ${userId} ${where} -> ${localPath}`);
+
+      msg.text =
+        `[Telegram photo saved to ${localPath} -- use the Read tool to view it]` +
+        (caption ? `\n${caption}` : '');
+      await this.messageHandler?.(msg);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(`[telegram] photo handler failed: ${reason}`);
+      await this.sendText(msg.conversationId, `⚠️ Couldn't process that photo: ${reason}`).catch(() => {});
     }
   }
 

@@ -186,6 +186,7 @@ compensate for emptying the ask list.
 | Command | What it does |
 |---|---|
 | `/new [--path <dir>] [name…]` | Start a session in a new topic. The path is a named parameter; everything else is the topic name, spaces and all. Without `--path` it starts in `BROKER_DEFAULT_CWD`; without a name the topic is named after the directory. |
+| `/resume <session-id> --path <dir> [name…]` | Watch an existing Claude session by id (one this broker didn't start — e.g. an interactive VS Code session) instead of spawning a new one. Find ids with `/all`. `--path` is required: the broker has no way to look up where an arbitrary session originally ran. See [Watching a live session](#watching-a-live-session) below. |
 | `/sessions` | Sessions this broker manages |
 | `/all [n] [--offset k] [--all]` | Every Claude session on this machine, brokered or not — grouped by project, newest first, each with its id, age and git branch. Defaults to the 30 most recent; `n` asks for a different count, `--offset k` pages through the rest, and `--all` dumps every one, split across as many messages as it takes. Each reply says which slice of the total it's showing, so a truncated list can't look like the whole set. Includes programmatic sessions (the broker's own included), which Claude Code's own session picker hides. |
 | `/history [n]` | Last `n` messages of this session's transcript |
@@ -193,7 +194,60 @@ compensate for emptying the ask list.
 | `/interrupt` | Stop what Claude is doing right now |
 | `/stop` | End the session process — the transcript survives and the next message resumes it |
 
-Anything that isn't a command is sent to Claude as a message.
+Anything that isn't a command is sent to Claude as a message. Photos work too:
+send one (with or without a caption) and the broker downloads it, saves it
+locally, and tells Claude where it landed — Claude's own `Read` tool already
+handles images, so no multimodal wiring was needed to make this work end to
+end. Audio/voice messages aren't handled yet.
+
+### Watching a live session
+
+`/resume <session-id> --path <dir>` doesn't spawn a second Claude process
+against an existing session id — doing that naively means two processes
+writing the same transcript file, which corrupts it. Instead the broker
+checks whether that session is verifiably alive right now, and picks one of
+two paths per message:
+
+- **Alive** — the message is relayed to the session instead of driven through
+  `query()` at all. The live session (typically an interactive VS Code
+  session, watching a small inbox directory via the harness's `Monitor`
+  feature and a `Stop` hook) picks it up as a normal turn and replies in
+  place; the reply mirrors back out to the same Telegram topic. Exactly one
+  process ever touches the transcript.
+- **Not alive** — falls through to the normal `query({resume: sessionId})`
+  path, a real headless continuation. Safe, because nothing else can be
+  writing to it while it's confirmed not running.
+
+"Alive" is decided by a heartbeat file, not a pid: `scripts/mirror/` ships
+the pieces needed on the watched side — a `SessionStart` hook that records
+identity, a `SessionEnd` hook that clears it on a clean exit, a `Stop` hook
+that mirrors replies out, and a poller that touches the heartbeat and claims
+inbox messages (maildir-style: `inbox/` → `processed/`, atomic rename, so
+ordering and double-processing are structurally impossible). A pid can be
+reused by an unrelated process after a crash and falsely read as "alive" —
+this can't, because nothing is checking a number, just how recently the
+poller was seen running.
+
+Wire it up on the watched side:
+
+```bash
+# copy scripts/mirror/*.py and mirror-poller.sh somewhere durable, then in
+# that project's .claude/settings.local.json:
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "python /path/to/watcher_start.py" }] }],
+    "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "python /path/to/watcher_end.py" }] }],
+    "Stop":         [{ "hooks": [{ "type": "command", "command": "TELEGRAM_BOT_TOKEN=<token> python /path/to/mirror_reply.py" }] }]
+  }
+}
+```
+
+`watcher_start.py`'s hook output tells Claude to arm the poller as a
+`Monitor` task — it can't start a long-lived background process itself,
+being a one-shot subprocess. `mirror_reply.py` looks up which Telegram topic
+is watching the current session from the broker's own state file (the same
+one `/resume` writes to), so nothing about the target chat/topic is
+hardcoded.
 
 ### Claude Code's own commands work too
 
