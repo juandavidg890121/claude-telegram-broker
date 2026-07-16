@@ -302,7 +302,11 @@ export class TelegramFrontend implements Frontend {
   private async transcribeAudio(localPath: string): Promise<string | null> {
     if (!config.groqApiKey) return null;
     const form = new FormData();
-    form.append('file', new Blob([readFileSync(localPath)]), 'audio.oga');
+    // Groq validates the multipart filename's extension against a fixed
+    // whitelist that includes "ogg" but not "oga" -- Telegram voice notes are
+    // Ogg/Opus either way, so the extension alone (not the actual bytes) was
+    // enough to get every voice message rejected with a 400.
+    form.append('file', new Blob([readFileSync(localPath)]), 'audio.ogg');
     form.append('model', 'whisper-large-v3-turbo');
     const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
       method: 'POST',
