@@ -1,0 +1,62 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Nothing here writes anything back. Read-only is the whole permission set the
+# job needs, so it is the whole permission set it gets.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: typecheck + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Reads the pnpm version from package.json's `packageManager` field, so CI
+      # and your laptop cannot drift apart.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # --frozen-lockfile: a lockfile that doesn't match package.json is a bug to
+      # report, not something CI should quietly resolve into a different tree
+      # than the one you tested.
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run typecheck
+
+      # The test suite is offline by design — no API key, no network, ~150ms —
+      # which is exactly what makes it runnable here.
+      #
+      # `pnpm smoke` and `pnpm smoke:fork` are deliberately NOT in CI: they drive
+      # a real Claude session, so they need a live API key and cost money per
+      # run. They stay a manual pre-release check. Adding them here would mean
+      # putting a billable credential in repository secrets to re-verify, on
+      # every push, something that only changes when the SDK does.
+      - run: pnpm test
+
+  security:
+    name: trivy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Three scanners, and `secret` is the one that earns its place in this
+      # repo: it handles a Telegram bot token and an allowlist that decides who
+      # can run commands on the host. The token belongs in .env (gitignored) and
+      # never in a committed file — this is what notices the day it does.
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
