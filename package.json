@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "description": "Drive Claude Code sessions from Telegram: create, list, fork, watch, and approve tool calls from your phone.",
   "scripts": {
-    "setup": "tsx scripts/setup.ts",
+    "configure": "tsx scripts/setup.ts",
     "start": "tsx --env-file-if-exists=.env src/index.ts",
     "print-hooks": "tsx scripts/mirror/print-hooks.ts",
     "smoke": "tsx --env-file-if-exists=.env src/smoke.ts",
