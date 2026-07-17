@@ -57,9 +57,10 @@ answer is caught now.
 
 ## 3. Apply
 
-Write the answers to a plan file and hand it to the installer. It validates every
-field again, does the writing/downloading/hook-merge, and **deletes the plan file
-itself** (it holds the token):
+Write the answers to a plan file and hand it to the installer. The full shape is
+`broker-plan.example.json` in the repo root. It validates every field again, does
+the writing/downloading/hook-merge, and **deletes the plan file itself** (it
+holds the token):
 
 ```bash
 cat > /tmp/broker-plan.json <<'JSON'

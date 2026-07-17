@@ -96,4 +96,13 @@ describe('setup --apply', () => {
     assert.notEqual(code, 0);
     assert.match(out, /Unknown model/);
   });
+
+  it('applies the committed example plan, so the docs can never go stale', () => {
+    // broker-plan.example.json is what the README and skill point people at. If
+    // a field there drifts from what --apply accepts, this fails.
+    const example = JSON.parse(readFileSync(join(root, 'broker-plan.example.json'), 'utf8'));
+    const { code, out } = apply({ ...example, output: 'export', installHooks: false });
+    assert.equal(code, 0, out);
+    assert.match(out, /export TELEGRAM_BOT_TOKEN=/);
+  });
 });
