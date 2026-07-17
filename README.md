@@ -33,6 +33,40 @@ every Telegram message already carries is the routing key, so there is no
 
 ## Setup
 
+### The quick way: `pnpm setup`
+
+```bash
+pnpm install
+pnpm setup
+```
+
+An interactive installer that does the whole configuration. It validates the
+token against Telegram, learns your user id and the group id by watching for a
+message you send (no hunting through @userinfobot or log lines), and offers to
+merge the `/watch` hooks into `~/.claude/settings.json` with a backup. It asks
+whether required fields can be skipped — they can't: press Enter past one and it
+re-asks, giving up after three tries rather than writing a broken config.
+
+If you opt into voice notes, it downloads a whisper model into a directory you
+choose (from the same menu the manual steps below describe) and then reports
+whether the `whisper.cpp` binary and `ffmpeg` are present, pointing you at how to
+get whichever is missing — it can't reliably build the binary for you, but it
+does the tedious model download and the wiring.
+
+At the end you choose where the config goes: a **`.env` file** (written `0600`,
+the broker reads it automatically) or **shell `export` commands** it prints for
+you to run — with the right syntax for your platform, whether that's `export` on
+Linux/macOS, `$env:` in PowerShell, or `set` in cmd. Run it in a real terminal —
+it reads the token hidden, so it never lands in scrollback. As a plugin,
+`/telegram-broker:setup` prints the one command to run.
+
+It still can't do the parts that live inside Telegram — creating the bot,
+turning privacy mode off, making the group — so it walks you through those and
+waits. Those are the manual steps below, for reference or for configuring by
+hand.
+
+### The manual way
+
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
 2. **Turn privacy mode off**: `/setprivacy` → pick your bot → **Disable**. Then
    **remove the bot from the group and add it back** — the change only takes
@@ -60,7 +94,8 @@ Get your numeric user id from [@userinfobot](https://t.me/userinfobot).
 
 5. **Only if you want `/watch`** (relaying into a session you have open in VS
    Code — `/new` and `/fork` need none of this): install three hooks, once, in
-   `~/.claude/settings.json`.
+   `~/.claude/settings.json`. `pnpm setup` offers to do this for you; the rest of
+   this step is the by-hand version.
 
    Print the block with real paths already filled in, from the checkout:
 

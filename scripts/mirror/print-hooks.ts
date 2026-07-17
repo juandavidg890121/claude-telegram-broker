@@ -11,34 +11,15 @@
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildHookConfig, tsxPath } from '../../src/hooks-config.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const tsx = join(root, 'node_modules', '.bin', 'tsx');
+const tsx = tsxPath(root);
 const env = join(root, '.env');
 
-const command = (script: string, withEnv: boolean): string =>
-  [tsx, withEnv ? `--env-file-if-exists=${env}` : '', join(root, 'scripts', 'mirror', script)]
-    .filter(Boolean)
-    .join(' ');
-
-const config = {
-  hooks: {
-    Stop: [{ hooks: [{ type: 'command', command: command('stop-hook.ts', true) }] }],
-    SessionStart: [{ hooks: [{ type: 'command', command: command('session-start-hook.ts', false) }] }],
-    // The matcher is what keeps this from firing on every tool call in every
-    // session. The hook checks tool_name too, but a config printed from here
-    // should not rely on the belt when it can print the braces.
-    PreToolUse: [
-      {
-        matcher: 'AskUserQuestion',
-        hooks: [{ type: 'command', command: command('ask-user-question-notify.ts', true) }],
-      },
-    ],
-  },
-};
-
-console.log('Merge this into the "hooks" object of ~/.claude/settings.json:\n');
-console.log(JSON.stringify(config, null, 2));
+console.log('Prefer `pnpm setup`, which merges this for you. To do it by hand,');
+console.log('merge this into the "hooks" object of ~/.claude/settings.json:\n');
+console.log(JSON.stringify({ hooks: buildHookConfig(root) }, null, 2));
 
 // Check the paths now, here, rather than let them fail invisibly inside a hook.
 const problems = [
