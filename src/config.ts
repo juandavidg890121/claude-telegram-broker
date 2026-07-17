@@ -54,6 +54,8 @@ export const config = {
   defaultCwd: process.env.BROKER_DEFAULT_CWD ?? homedir(),
   /** Where the topic-to-session registry lives. */
   stateFile: process.env.BROKER_STATE_FILE ?? join(homedir(), '.claude-telegram-broker.json'),
+  /** Where scheduled /loop prompts live. */
+  loopsFile: process.env.BROKER_LOOPS_FILE ?? join(homedir(), '.claude-telegram-broker-loops.json'),
   model: process.env.BROKER_MODEL ?? undefined,
   permissionMode: (process.env.BROKER_PERMISSION_MODE ?? 'default') as
     | 'default'

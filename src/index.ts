@@ -15,9 +15,11 @@ import { PERMISSION_MODES, SessionManager } from './sessions.js';
 import { TelegramFrontend } from './telegram.js';
 import { heartbeatFresh, writeInboxMessage } from './mirror.js';
 import { renderPreview } from './preview.js';
+import { LoopComplaints, LoopStore, formatDuration, parseDuration, startLoopScheduler, type Loop } from './loops.js';
 import type { Frontend, Inbound } from './frontend.js';
 
 const registry = new Registry(config.stateFile);
+const loops = new LoopStore(config.loopsFile);
 const frontend: Frontend = new TelegramFrontend();
 
 const sessions = new SessionManager({
@@ -46,6 +48,11 @@ frontend.onCommand('help', async (msg) => {
       `    /all --offset ${ALL_PAGE}    → the next page`,
       '    /all --all        → all of them, across several messages',
       '/history [n] — last n messages of this session',
+      '/loop <interval> <prompt…> — fire prompt into this conversation on a',
+      '    repeat, e.g. /loop 2h check the deploy queue. Interval: 30m, 2h, 1d…',
+      '/loops — list this conversation’s scheduled loops',
+      '/unloop <id> — cancel a loop',
+      '/reloop <id> <interval> <prompt…> — replace a loop’s interval and prompt',
       '/mode [name] — show or change this session’s permission mode',
       '/stop — end this session (the transcript survives; the next message resumes it)',
       '/interrupt — stop what Claude is doing right now',
@@ -498,45 +505,178 @@ frontend.onCommand('stop', async (msg) => {
   await frontend.sendText(msg.conversationId, '🔴 Session stopped. Send a message to resume it.');
 });
 
-frontend.onMessage(async (msg: Inbound) => {
-  // First contact in a conversation we've never seen: adopt it with defaults so
-  // the user can just start talking.
+/** Whether a prompt reached the session, and if not, why — the caller decides
+ *  what that is worth saying, because the answer differs for a person who just
+ *  typed and a timer that fired. */
+type Delivery = 'delivered' | 'not-listening';
+
+/**
+ * Deliver text into a conversation exactly as if the user had typed it —
+ * watched-session inbox routing or driving a broker-owned session directly. The
+ * single path both a real inbound Telegram message and a due /loop prompt go
+ * through, so a loop is indistinguishable from having typed it yourself.
+ *
+ * It reports rather than announces. The refusal below used to be sent from
+ * here, which was right for the only caller it had: a person who typed. When a
+ * loop started calling it too, that same paragraph went out on every fire,
+ * forever, to a topic whose session had simply been closed.
+ */
+async function deliverMessage(conversationId: string, text: string): Promise<Delivery> {
   const entry =
-    registry.get(msg.conversationId) ??
-    sessions.register(msg.conversationId, config.defaultCwd, 'default');
+    registry.get(conversationId) ?? sessions.register(conversationId, config.defaultCwd, 'default');
 
   if (entry.watch && entry.sessionId) {
-    if (!heartbeatFresh(entry.sessionId)) {
-      // Deliberately no headless fallback. Driving the session here because it
-      // *looks* gone is how you get two writers on one transcript: liveness is a
-      // lease, a lease has false positives, and a suspended laptop is
-      // indistinguishable from a closed one. Refusing is always safe; guessing
-      // is not. /fork is the answer when the session really is gone.
-      // Name all three ways back. The commonest cause is a closed VS Code
-      // window — the poller is a Monitor and dies with its session — and the
-      // instinct then is to /watch again, which fixes nothing: the mapping is on
-      // disk and was never what broke.
-      await frontend.sendText(
-        msg.conversationId,
-        `⏸️ Not delivered — nothing is listening in \`${entry.sessionId.slice(0, 8)}\` right now. ` +
-          `Its watcher stops when that session closes; you don't need to /watch again, ` +
-          `the link is still here. To get it listening:\n\n` +
-          `• type anything in that session — it re-arms when the turn ends\n` +
-          `• or run there: /telegram-broker:watch ${entry.sessionId}\n` +
-          `• or reopen it — resuming re-arms it automatically\n\n` +
-          `If it's gone for good, /fork ${entry.sessionId} branches it and I'll drive it from here.`,
-      );
-      return;
-    }
-    writeInboxMessage(entry.sessionId, msg.text);
+    // Deliberately no headless fallback. Driving the session here because it
+    // *looks* gone is how you get two writers on one transcript: liveness is a
+    // lease, a lease has false positives, and a suspended laptop is
+    // indistinguishable from a closed one. Refusing is always safe; guessing
+    // is not. /fork is the answer when the session really is gone.
+    if (!heartbeatFresh(entry.sessionId)) return 'not-listening';
+    writeInboxMessage(entry.sessionId, text);
+    return 'delivered';
+  }
+
+  await sessions.send(conversationId, text);
+  return 'delivered';
+}
+
+frontend.onMessage(async (msg: Inbound) => {
+  if ((await deliverMessage(msg.conversationId, msg.text)) === 'delivered') return;
+
+  const entry = registry.get(msg.conversationId);
+  // Name all three ways back. The commonest cause is a closed VS Code window —
+  // the poller is a Monitor and dies with its session — and the instinct then is
+  // to /watch again, which fixes nothing: the mapping is on disk and was never
+  // what broke.
+  await frontend.sendText(
+    msg.conversationId,
+    `⏸️ Not delivered — nothing is listening in ${entry?.sessionId?.slice(0, 8)} right now. ` +
+      `Its watcher stops when that session closes; you don't need to /watch again, ` +
+      `the link is still here. To get it listening:\n\n` +
+      `• type anything in that session — it re-arms when the turn ends\n` +
+      `• or run there: /telegram-broker:watch ${entry?.sessionId}\n` +
+      `• or reopen it — resuming re-arms it automatically\n\n` +
+      `If it's gone for good, /fork ${entry?.sessionId} branches it and I'll drive it from here.`,
+  );
+});
+
+/**
+ * In memory on purpose: a restart is exactly when a still-broken loop is worth
+ * hearing about again, and persisting it would mean another file to keep atomic
+ * for what is only a hint.
+ */
+const complaints = new LoopComplaints();
+
+/**
+ * A due loop, delivered with the two judgements a timer needs and a person does
+ * not.
+ *
+ * Skip while working: someone typing a second message mid-turn means it, and it
+ * queues. A timer firing again because the last answer is still being written
+ * means nothing — and queueing it builds a backlog that never drains, since the
+ * next fire is already scheduled. A 1m loop against 5m turns queues five
+ * prompts every five minutes, forever. The minimum interval does not save you
+ * from this; only skipping does.
+ *
+ * Complain once: a loop pointed at a closed VS Code session cannot deliver, and
+ * saying so every 30 minutes for a week is how you learn to ignore the topic.
+ * Say it on the first miss, then go quiet until it lands again — the same shape
+ * as the quota alert, and for the same reason.
+ */
+async function deliverLoop(loop: Loop): Promise<void> {
+  if (sessions.isWorking(loop.conversationId)) {
+    console.log(`[loops] ${loop.id} skipped: still working on the last one`);
     return;
   }
 
-  await sessions.send(msg.conversationId, msg.text);
+  const outcome = await deliverMessage(loop.conversationId, loop.prompt);
+  if (!complaints.shouldReport(loop.id, outcome)) return;
+
+  await frontend.sendText(
+    loop.conversationId,
+    `🔁 Loop ${loop.id} couldn't fire — nothing is listening in this watched session. ` +
+      `It keeps trying every ${formatDuration(loop.intervalMs)} and will say nothing more until it lands; ` +
+      `/unloop ${loop.id} to stop it.`,
+  );
+}
+
+const loopScheduler = startLoopScheduler(loops, deliverLoop);
+
+/**
+ * `/loop <interval> <prompt…>` — schedule prompt to fire into this
+ * conversation every interval, starting one interval from now.
+ */
+frontend.onCommand('loop', async (msg, args) => {
+  const tokens = args.trim().split(/\s+/);
+  const intervalText = tokens.shift() ?? '';
+  const prompt = tokens.join(' ');
+  if (!intervalText || !prompt) {
+    throw new Error(
+      '/loop <interval> <prompt…> — e.g. /loop 2h check the deploy queue.\n' +
+        'Manage existing loops: /loops, /unloop <id>, /reloop <id> <interval> <prompt…>',
+    );
+  }
+  const intervalMs = parseDuration(intervalText);
+  const loop = loops.add(msg.conversationId, intervalMs, prompt);
+  await frontend.sendText(
+    msg.conversationId,
+    `🔁 Loop ${loop.id} set — "${prompt}" every ${formatDuration(intervalMs)}, ` +
+      `first fire in ${formatDuration(intervalMs)}.\n/unloop ${loop.id} to cancel.`,
+  );
+});
+
+frontend.onCommand('loops', async (msg) => {
+  const mine = loops.listFor(msg.conversationId);
+  if (!mine.length) {
+    await frontend.sendText(msg.conversationId, 'No loops in this conversation. /loop <interval> <prompt…> to add one.');
+    return;
+  }
+  const body = mine
+    .map((l) => {
+      const inMs = l.nextFireAt - Date.now();
+      // No clamping to a minute: a loop due in 20s should say 20s, not round
+      // itself up into a lie about when it will actually fire.
+      const nextIn = inMs > 0 ? `next in ${formatDuration(inMs)}` : 'due now';
+      return `• ${l.id} — every ${formatDuration(l.intervalMs)} (${nextIn})\n  "${l.prompt}"`;
+    })
+    .join('\n');
+  await frontend.sendText(msg.conversationId, body);
+});
+
+frontend.onCommand('unloop', async (msg, args) => {
+  const id = args.trim().split(/\s+/)[0];
+  if (!id) throw new Error('/unloop <id> — find ids with /loops.');
+  if (!loops.remove(msg.conversationId, id)) {
+    throw new Error(`No loop ${id} in this conversation. Check the id with /loops.`);
+  }
+  // Ids are random, but they are only 3 bytes: a new loop could be handed this
+  // one back, and would inherit its silence.
+  complaints.forget(id);
+  await frontend.sendText(msg.conversationId, `🛑 Loop ${id} cancelled.`);
+});
+
+frontend.onCommand('reloop', async (msg, args) => {
+  const tokens = args.trim().split(/\s+/);
+  const id = tokens.shift() ?? '';
+  const intervalText = tokens.shift() ?? '';
+  const prompt = tokens.join(' ');
+  if (!id || !intervalText || !prompt) {
+    throw new Error('/reloop <id> <interval> <prompt…> — find ids with /loops.');
+  }
+  const intervalMs = parseDuration(intervalText);
+  const loop = loops.edit(msg.conversationId, id, intervalMs, prompt);
+  if (!loop) throw new Error(`No loop ${id} in this conversation. Check the id with /loops.`);
+  await frontend.sendText(
+    msg.conversationId,
+    `🔁 Loop ${loop.id} updated — "${prompt}" every ${formatDuration(intervalMs)}, next fire in ${formatDuration(intervalMs)}.`,
+  );
 });
 
 async function shutdown(): Promise<void> {
   console.log('\n[broker] shutting down…');
+  // Before stopAll: a tick landing mid-shutdown would push a prompt into a
+  // session being torn down.
+  clearInterval(loopScheduler);
   await sessions.stopAll();
   await frontend.stop();
   process.exit(0);

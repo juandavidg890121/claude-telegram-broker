@@ -248,6 +248,7 @@ Where the `.env` lives depends on how you run the broker:
 | `TELEGRAM_GROUP_ID` | none | **Required for the topic-per-session workflow** — without it `/new` cannot open a topic. Only omit it if you want the degraded mode: talk to the bot in a DM and get a single session for the whole chat. |
 | `BROKER_DEFAULT_CWD` | your home dir | The directory a session starts in when `/new` is given no path — so `/new` alone lands somewhere useful instead of `~`. Set it to wherever your repos live. It's also the cwd adopted when you message a conversation the broker has never seen. |
 | `BROKER_STATE_FILE` | `~/.claude-telegram-broker.json` | Where the conversation → session-id registry is written. Move it if you want to run two brokers side by side. |
+| `BROKER_LOOPS_FILE` | `~/.claude-telegram-broker-loops.json` | Where `/loop` schedules are written. Move it alongside `BROKER_STATE_FILE` if you run two brokers, or they'll fire each other's loops. |
 | `BROKER_MODEL` | the SDK's default | Model for spawned sessions, e.g. `claude-opus-4-8`. |
 | `BROKER_PERMISSION_MODE` | `default` | Baseline behaviour for tools **not** in `BROKER_ASK_TOOLS`. See below. |
 | `BROKER_ASK_TOOLS` | `Bash,Write,Edit,NotebookEdit` | Tools that **always** require an Allow/Deny confirmation in Telegram. |
@@ -284,6 +285,10 @@ compensate for emptying the ask list.
 | `/sessions` | Sessions this broker manages. Watched topics are flagged, including whether they're armed right now |
 | `/all [n] [--offset k] [--all]` | Every Claude session on this machine, brokered or not — grouped by project, newest first, each with its id, age and git branch. Defaults to the 30 most recent; `n` asks for a different count, `--offset k` pages through the rest, and `--all` dumps every one, split across as many messages as it takes. Each reply says which slice of the total it's showing, so a truncated list can't look like the whole set. Includes programmatic sessions (the broker's own included), which Claude Code's own session picker hides. |
 | `/history [n]` | Last `n` messages of this session's transcript |
+| `/loop <interval> <prompt…>` | Fire `prompt` into this conversation on a repeat — `/loop 2h check the deploy queue`. It arrives exactly as if you had typed it, so it drives a brokered session or relays into a watched one just the same. Interval is `5m`, `30m`, `2h`, `1d`; minimum `1m`. First fire is one interval away, not immediate. Telegram's own scheduled messages are a phone-to-Telegram feature invisible to bots, so this is the broker's timer. |
+| `/loops` | This conversation's loops, with when each fires next |
+| `/unloop <id>` | Cancel a loop. Ids come from `/loops` |
+| `/reloop <id> <interval> <prompt…>` | Replace a loop's interval and prompt, rescheduled from now |
 | `/mode [name]` | Show or change this session's permission mode. Persists, so it survives a restart and applies on resume. `BROKER_ASK_TOOLS` still prompts regardless — see below. (Switching *model* is Claude Code's own `/model`, below.) |
 | `/interrupt` | Stop what Claude is doing right now |
 | `/stop` | End the session process — the transcript survives and the next message resumes it |
