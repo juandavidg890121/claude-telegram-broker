@@ -23,15 +23,18 @@ import { fileURLToPath } from 'node:url';
 import { stdin, stdout } from 'node:process';
 import { buildHookConfig, mergeHooks, tsxPath } from '../src/hooks-config.js';
 import {
+  collectRequired,
   normalizeGroupId,
   parseGetMe,
   parseUpdates,
   renderEnv,
+  renderExports,
   validateToken,
   validateUserId,
   type DiscoveredGroup,
   type DiscoveredUser,
   type SetupAnswers,
+  type Shell,
 } from '../src/setup-core.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -46,6 +49,19 @@ const dim = (s: string): string => `\x1b[2m${s}\x1b[0m`;
 async function ask(question: string, fallback = ''): Promise<string> {
   const answer = (await rl.question(`${question}${fallback ? dim(` [${fallback}]`) : ''} `)).trim();
   return answer || fallback;
+}
+
+/**
+ * A required answer, with the give-up rule in collectRequired: Enter is not an
+ * escape hatch, and MAX_TRIES empty-or-invalid answers stop the whole setup
+ * rather than write half a config. `label` names the field in the messages;
+ * `read` is passed in so the token can use the hidden reader.
+ */
+function required<T>(label: string, read: () => Promise<string>, validate: (raw: string) => Promise<T> | T): Promise<T> {
+  return collectRequired(read, validate, (message, triesLeft) => {
+    const left = triesLeft > 0 ? dim(` (${triesLeft} more)`) : '';
+    say(`  ⚠️  ${label}: ${message}${left}`);
+  });
 }
 
 async function yes(question: string, defaultYes = false): Promise<boolean> {
@@ -119,8 +135,9 @@ async function discover<T>(token: string, waitingFor: string, pick: (payload: un
 
 async function main(): Promise<void> {
   say(bold('\n  Telegram broker setup\n'));
-  say('  This writes .env and the /watch hooks for you. A few steps happen inside');
-  say('  Telegram and only you can do them — this walks you through those first.\n');
+  say('  This collects the config and sets up the /watch hooks. You choose at the');
+  say('  end whether it lands in a .env file or as shell exports. A few steps happen');
+  say('  inside Telegram and only you can do them — this walks you through those.\n');
 
   // 1. The bot ---------------------------------------------------------------
   say(bold('  1. The bot'));
@@ -128,19 +145,16 @@ async function main(): Promise<void> {
   say('  the token it gives you. Then turn privacy mode off so the bot can read');
   say('  group messages: /setprivacy → your bot → Disable.\n');
 
-  let token = '';
-  let botName = '';
-  for (;;) {
-    try {
-      token = validateToken(await secret('  Paste the bot token:'));
-      const me = parseGetMe(await api(token, 'getMe'));
-      botName = me.username;
-      say(`  ${dim('✓')} token works — this is @${botName}\n`);
-      break;
-    } catch (error) {
-      say(`  ⚠️  ${error instanceof Error ? error.message : String(error)}\n`);
-    }
-  }
+  const { token, botName } = await required(
+    'A bot token',
+    () => secret('  Paste the bot token:'),
+    async (raw) => {
+      const validated = validateToken(raw);
+      const me = parseGetMe(await api(validated, 'getMe'));
+      say(`  ${dim('✓')} token works — this is @${me.username}\n`);
+      return { token: validated, botName: me.username };
+    },
+  );
 
   // 2. Your user id ----------------------------------------------------------
   say(bold('  2. You'));
@@ -152,7 +166,15 @@ async function main(): Promise<void> {
     say(`  ${dim('✓')} that's you: ${users.map((u) => `${u.name} (${u.id})`).join(', ')}`);
     allowed = users.map((u) => u.id);
   } else {
-    allowed = [validateUserId(await ask('\n  Your numeric user id (from @userinfobot):'))];
+    // Required: the broker refuses to start with an empty allowlist, so there
+    // is no sensible empty answer to fall through to.
+    allowed = [
+      await required(
+        'Your user id',
+        () => ask('\n  Your numeric user id (from @userinfobot):'),
+        (raw) => validateUserId(raw),
+      ),
+    ];
   }
   const extra = await ask('\n  Other user ids to allow, comma-separated, or Enter for none:');
   if (extra) allowed.push(...extra.split(',').map((s) => validateUserId(s)));
@@ -201,9 +223,18 @@ async function main(): Promise<void> {
     say('');
   }
 
-  // 5. Write .env ------------------------------------------------------------
-  writeSecret(envPath, renderEnv(answers));
-  say(`  ${dim('✓')} wrote ${envPath} ${dim('(chmod 600 — it holds your token)')}`);
+  // 5. .env or exports -------------------------------------------------------
+  say(bold('  Where should the configuration go?'));
+  say('  1) a .env file next to the broker ' + dim('(recommended — the broker reads it automatically)'));
+  say('  2) export commands you run in your shell ' + dim('(nothing is written to disk)'));
+  const wroteEnv = (await ask('  Choose 1 or 2', '1')) !== '2';
+
+  if (wroteEnv) {
+    writeSecret(envPath, renderEnv(answers));
+    say(`  ${dim('✓')} wrote ${envPath}${process.platform === 'win32' ? '' : dim(' (chmod 600 — it holds your token)')}`);
+  } else {
+    printExports(answers);
+  }
 
   // 6. Hooks -----------------------------------------------------------------
   if (!existsSync(tsxPath(root))) {
@@ -211,6 +242,11 @@ async function main(): Promise<void> {
   }
   if (await yes('\n  Install the /watch hooks into ' + settingsPath + '?', true)) {
     installHooks();
+    if (!wroteEnv) {
+      say(dim('  Note: with no .env, these hooks need the variables exported in the'));
+      say(dim('  environment Claude Code itself runs in — export them there too, or'));
+      say(dim('  re-run setup and choose the .env file, which the hooks read directly.'));
+    }
   } else {
     say('  Skipped. Run ' + bold('pnpm print-hooks') + ' later to add them by hand.');
   }
@@ -228,7 +264,26 @@ function writeSecret(path: string, content: string): void {
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, content, { mode: 0o600 });
   renameSync(tmp, path);
-  chmodSync(path, 0o600);
+  // POSIX only: on Windows chmod maps to the read-only bit and 0600 is
+  // meaningless there, so skip it rather than pretend the file is locked down.
+  if (process.platform !== 'win32') chmodSync(path, 0o600);
+}
+
+/**
+ * Print the config as commands the user runs. Nothing is written, so the token
+ * is visible in the terminal — that is the trade for choosing this over a file,
+ * and the note says so.
+ */
+async function printExports(answers: SetupAnswers): Promise<void> {
+  let shell: Shell = 'posix';
+  if (process.platform === 'win32') {
+    shell = (await ask('  Which shell — 1) PowerShell  2) cmd', '1')) === '2' ? 'cmd' : 'powershell';
+  }
+  say('\n  Run these in the shell where you start Claude Code / the broker:\n');
+  for (const line of renderExports(answers, shell).split('\n')) say('    ' + line);
+  say(dim('\n  These last for the current shell only. Add them to your shell profile'));
+  say(dim('  to make them stick. The token is shown above — clear your scrollback'));
+  say(dim('  if that matters to you.'));
 }
 
 function installHooks(): void {
@@ -252,9 +307,24 @@ function installHooks(): void {
   say(dim('  Restart any open Claude session for them to load.'));
 }
 
+let finished = false;
+
+// If stdin closes while a prompt is pending — EOF, piped input running out —
+// the awaited question never settles and the process would hang, then exit on
+// Node's "unsettled top-level await" path with a confusing code. Turn that into
+// a clean, explained exit instead.
+rl.once('close', () => {
+  if (!finished) {
+    say('\n  ⚠️  Input closed before setup finished. Run it again in a terminal.');
+    process.exit(1);
+  }
+});
+
 try {
   await main();
+  finished = true;
 } catch (error) {
+  finished = true;
   say(`\n  ⚠️  ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 } finally {

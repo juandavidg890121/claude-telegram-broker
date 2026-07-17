@@ -42,11 +42,17 @@ pnpm setup
 
 An interactive installer that does the whole configuration. It validates the
 token against Telegram, learns your user id and the group id by watching for a
-message you send (no hunting through @userinfobot or log lines), writes `.env`
-with `0600` perms, and offers to merge the `/watch` hooks into
-`~/.claude/settings.json` with a backup. Run it in a real terminal — it reads
-the token hidden, so it never lands in scrollback. As a plugin, `/telegram-broker:setup`
-prints the one command to run.
+message you send (no hunting through @userinfobot or log lines), and offers to
+merge the `/watch` hooks into `~/.claude/settings.json` with a backup. It asks
+whether required fields can be skipped — they can't: press Enter past one and it
+re-asks, giving up after three tries rather than writing a broken config.
+
+At the end you choose where the config goes: a **`.env` file** (written `0600`,
+the broker reads it automatically) or **shell `export` commands** it prints for
+you to run — with the right syntax for your platform, whether that's `export` on
+Linux/macOS, `$env:` in PowerShell, or `set` in cmd. Run it in a real terminal —
+it reads the token hidden, so it never lands in scrollback. As a plugin,
+`/telegram-broker:setup` prints the one command to run.
 
 It still can't do the parts that live inside Telegram — creating the bot,
 turning privacy mode off, making the group — so it walks you through those and

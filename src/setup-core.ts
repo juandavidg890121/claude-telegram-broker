@@ -113,30 +113,22 @@ export type SetupAnswers = {
   whisperLanguage?: string;
 };
 
-/** A value safe to put after `KEY=` in a .env line: no newline can smuggle in a
- *  second variable. Quotes only when needed, so simple values stay readable. */
-function envValue(raw: string): string {
-  const value = raw.replace(/[\r\n]+/g, ' ').trim();
-  return /[\s#"']/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value;
-}
-
 /**
- * The exact text written to .env.
+ * The KEY=value pairs a set of answers produces, required first.
  *
- * Only what the user actually set — an installer that writes every optional key
- * commented-out is just .env.example, and the whole point was to not hand them
- * that. Required keys always; optional keys only when answered.
+ * One list, so `.env` and every shell's `export` form describe the same
+ * environment — a variable that reached the file but not the exports, or vice
+ * versa, is exactly the kind of silent half-configuration this installer
+ * exists to remove. A newline is stripped here, at the source, so no rendering
+ * of it can smuggle in a second variable no matter the target syntax.
  */
-export function renderEnv(answers: SetupAnswers): string {
-  const lines: string[] = [
-    '# Written by the telegram-broker setup. Re-run it to regenerate, or edit by hand.',
-    '# See .env.example for every option and what it does.',
-    '',
-    `TELEGRAM_BOT_TOKEN=${envValue(answers.token)}`,
-    `TELEGRAM_ALLOWED_USERS=${envValue(answers.allowedUsers.join(','))}`,
+export function configPairs(answers: SetupAnswers): Array<[string, string]> {
+  const clean = (raw: string): string => raw.replace(/[\r\n]+/g, ' ').trim();
+  const pairs: Array<[string, string]> = [
+    ['TELEGRAM_BOT_TOKEN', answers.token],
+    ['TELEGRAM_ALLOWED_USERS', answers.allowedUsers.join(',')],
   ];
-
-  if (answers.groupId) lines.push(`TELEGRAM_GROUP_ID=${envValue(answers.groupId)}`);
+  if (answers.groupId) pairs.push(['TELEGRAM_GROUP_ID', answers.groupId]);
 
   const optional: Array<[string, string | undefined]> = [
     ['BROKER_DEFAULT_CWD', answers.defaultCwd],
@@ -147,11 +139,94 @@ export function renderEnv(answers: SetupAnswers): string {
     ['BROKER_WHISPER_MODEL', answers.whisperModel],
     ['BROKER_WHISPER_LANGUAGE', answers.whisperLanguage],
   ];
-  const set = optional.filter((pair): pair is [string, string] => Boolean(pair[1]));
-  if (set.length) {
-    lines.push('');
-    for (const [key, value] of set) lines.push(`${key}=${envValue(value)}`);
-  }
+  for (const [key, value] of optional) if (value) pairs.push([key, value]);
 
+  return pairs.map(([key, value]) => [key, clean(value)]);
+}
+
+/** A .env value, quoted only when it contains something that needs it. */
+function envValue(value: string): string {
+  return /[\s#"']/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value;
+}
+
+/**
+ * The exact text written to .env — only the keys the user actually set. An
+ * installer that writes every optional key commented-out is just
+ * .env.example, and the point was not to hand them that.
+ */
+export function renderEnv(answers: SetupAnswers): string {
+  const [required, ...optional] = groupRequired(configPairs(answers));
+  const lines = [
+    '# Written by the telegram-broker setup. Re-run it to regenerate, or edit by hand.',
+    '# See .env.example for every option and what it does.',
+    '',
+    ...required.map(([k, v]) => `${k}=${envValue(v)}`),
+  ];
+  if (optional.length) {
+    lines.push('', ...optional.flat().map(([k, v]) => `${k}=${envValue(v)}`));
+  }
   return lines.join('\n') + '\n';
+}
+
+export const MAX_TRIES = 3;
+
+/**
+ * The give-up rule for a required answer, kept here so it can be tested without
+ * a terminal: read up to MAX_TRIES times, return the first non-empty value that
+ * validates, and throw once the tries run out.
+ *
+ * The point is that a required field cannot be skipped by pressing Enter past
+ * it — an empty answer is a failed try, not an accepted blank. The reader and
+ * validator are injected so the real installer can wire in hidden input and
+ * live API checks, and a test can wire in a scripted list of answers.
+ */
+export async function collectRequired<T>(
+  read: () => Promise<string>,
+  validate: (raw: string) => Promise<T> | T,
+  onFailure: (message: string, triesLeft: number) => void = () => {},
+): Promise<T> {
+  for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+    const triesLeft = MAX_TRIES - attempt;
+    const raw = (await read()).trim();
+    if (!raw) {
+      onFailure('required — it cannot be left blank', triesLeft);
+      continue;
+    }
+    try {
+      return await validate(raw);
+    } catch (error) {
+      onFailure(error instanceof Error ? error.message : String(error), triesLeft);
+    }
+  }
+  throw new Error(`Not provided after ${MAX_TRIES} tries — setup stopped. Run it again when you have it.`);
+}
+
+export type Shell = 'posix' | 'powershell' | 'cmd';
+
+/**
+ * The variables as commands the user runs themselves, for whoever would rather
+ * export than keep a file. Session-scoped, like `.env` and like `export`
+ * itself: the note the installer prints says how to persist them.
+ *
+ * Three shells because the syntax genuinely differs — and handing a Windows
+ * user a bash line is the same dead end as the placeholder paths this whole
+ * flow replaced. Quoting keeps spaces and each shell's own metacharacters as
+ * data: `'\''` for sh, doubled `''` for PowerShell, `%%` for cmd.
+ */
+export function renderExports(answers: SetupAnswers, shell: Shell): string {
+  return configPairs(answers)
+    .map(([key, value]) => {
+      if (shell === 'posix') return `export ${key}='${value.replace(/'/g, `'\\''`)}'`;
+      if (shell === 'powershell') return `$env:${key} = '${value.replace(/'/g, `''`)}'`;
+      return `set "${key}=${value.replace(/%/g, '%%')}"`;
+    })
+    .join('\n');
+}
+
+/** Split pairs into [required, ...optional-as-singletons] for spacing in .env. */
+function groupRequired(pairs: Array<[string, string]>): Array<Array<[string, string]>> {
+  const requiredKeys = new Set(['TELEGRAM_BOT_TOKEN', 'TELEGRAM_ALLOWED_USERS', 'TELEGRAM_GROUP_ID']);
+  const required = pairs.filter(([k]) => requiredKeys.has(k));
+  const optional = pairs.filter(([k]) => !requiredKeys.has(k));
+  return [required, ...optional.map((p) => [p])];
 }

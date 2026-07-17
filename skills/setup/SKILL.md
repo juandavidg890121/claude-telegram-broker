@@ -7,8 +7,11 @@ disable-model-invocation: true
 
 There is an interactive installer that does the whole configuration: it
 validates the bot token against Telegram, discovers the user's id and group id
-by watching for a message, writes `.env`, and merges the `/watch` hooks into
-`~/.claude/settings.json` with a backup.
+by watching for a message, and merges the `/watch` hooks into
+`~/.claude/settings.json` with a backup. At the end it asks whether to write the
+config to a `.env` file or print it as shell `export` commands — the export form
+detects Windows vs POSIX and prints the right syntax (`export`, `$env:`, or
+`set`).
 
 It is interactive — it reads a hidden token and waits for the user to send
 Telegram messages — so it needs a real terminal. **Do not try to run it through

@@ -9,10 +9,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  MAX_TRIES,
+  collectRequired,
   normalizeGroupId,
   parseGetMe,
   parseUpdates,
   renderEnv,
+  renderExports,
   validateToken,
   validateUserId,
 } from '../src/setup-core.js';
@@ -173,5 +176,88 @@ describe('renderEnv', () => {
 
   it('ends with a trailing newline', () => {
     assert.ok(renderEnv({ token: 'T:1', allowedUsers: ['1'] }).endsWith('\n'));
+  });
+});
+
+describe('renderExports', () => {
+  const answers = { token: 'T:1', allowedUsers: ['1', '2'], groupId: '-100', defaultCwd: '/home/a b/code' };
+
+  it('uses each shell own syntax', () => {
+    assert.match(renderExports(answers, 'posix'), /^export TELEGRAM_BOT_TOKEN='T:1'$/m);
+    assert.match(renderExports(answers, 'powershell'), /^\$env:TELEGRAM_BOT_TOKEN = 'T:1'$/m);
+    assert.match(renderExports(answers, 'cmd'), /^set "TELEGRAM_BOT_TOKEN=T:1"$/m);
+  });
+
+  it('describes the same variables as .env, in the same order', () => {
+    // The two forms must not disagree about what the config is.
+    const envKeys = renderEnv(answers).match(/^[A-Z_]+(?==)/gm);
+    const exportKeys = renderExports(answers, 'posix').match(/(?<=export )[A-Z_]+/g);
+    assert.deepEqual(exportKeys, envKeys);
+  });
+
+  it('quotes a value with spaces so the path survives', () => {
+    assert.match(renderExports(answers, 'posix'), /^export BROKER_DEFAULT_CWD='\/home\/a b\/code'$/m);
+    assert.match(renderExports(answers, 'powershell'), /^\$env:BROKER_DEFAULT_CWD = '\/home\/a b\/code'$/m);
+    assert.match(renderExports(answers, 'cmd'), /^set "BROKER_DEFAULT_CWD=\/home\/a b\/code"$/m);
+  });
+
+  it('escapes each shell own quote or metacharacter', () => {
+    const tricky = { token: "a'b", allowedUsers: ['1'] };
+    assert.match(renderExports(tricky, 'posix'), /export TELEGRAM_BOT_TOKEN='a'\\''b'/);
+    assert.match(renderExports(tricky, 'powershell'), /\$env:TELEGRAM_BOT_TOKEN = 'a''b'/);
+    assert.match(renderExports({ token: 'a%b', allowedUsers: ['1'] }, 'cmd'), /set "TELEGRAM_BOT_TOKEN=a%%b"/);
+  });
+});
+
+describe('collectRequired', () => {
+  /** A reader that hands back a scripted list of answers, one per call. */
+  const scripted = (answers: string[]) => {
+    let i = 0;
+    return () => Promise.resolve(answers[i++] ?? '');
+  };
+
+  it('returns the first valid answer', async () => {
+    const value = await collectRequired(scripted(['123']), validateUserId);
+    assert.equal(value, '123');
+  });
+
+  it('re-prompts past an empty answer rather than accepting it', async () => {
+    // The whole point: Enter is not a way to skip a required field.
+    const value = await collectRequired(scripted(['', '', '456']), validateUserId);
+    assert.equal(value, '456');
+  });
+
+  it('rejects empty even when the validator itself would accept it', async () => {
+    // The emptiness guard has to stand on its own: a free-text required field
+    // (a whisper dir, say) has no format to reject a blank, so if collectRequired
+    // didn't, Enter would sail straight through.
+    const acceptAnything = (raw: string) => raw;
+    await assert.rejects(() => collectRequired(scripted(['', '', '']), acceptAnything), /after 3 tries/);
+    assert.equal(await collectRequired(scripted(['', 'ok']), acceptAnything), 'ok');
+  });
+
+  it('re-prompts past an invalid answer too', async () => {
+    const value = await collectRequired(scripted(['@nope', '789']), validateUserId);
+    assert.equal(value, '789');
+  });
+
+  it('fails after three empty answers instead of writing a blank', async () => {
+    await assert.rejects(() => collectRequired(scripted(['', '', '']), validateUserId), /after 3 tries/);
+  });
+
+  it('stops at exactly MAX_TRIES', async () => {
+    let reads = 0;
+    const counting = () => {
+      reads += 1;
+      return Promise.resolve('');
+    };
+    await assert.rejects(() => collectRequired(counting, validateUserId));
+    assert.equal(reads, MAX_TRIES, 'not one prompt more than the limit');
+  });
+
+  it('reports how many tries remain', async () => {
+    const left: number[] = [];
+    await collectRequired(scripted(['', '5']), validateUserId, (_m, triesLeft) => left.push(triesLeft));
+    assert.deepEqual(left, [2], 'one empty answer, two tries left after it');
   });
 });
