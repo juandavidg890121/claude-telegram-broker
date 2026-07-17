@@ -23,6 +23,7 @@ import { chunkify } from '../../src/chunk.js';
 import { findWatched } from '../../src/broker-state.js';
 import { heartbeatFresh } from '../../src/mirror.js';
 import { armInstruction } from '../../src/watch-arm.js';
+import { quotaSuffix, checkAlert } from '../../src/quota.js';
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -60,6 +61,19 @@ async function main(): Promise<void> {
 
   await mirrorReply(entry.conversationId, payload.last_assistant_message?.trim());
 
+  const alert = await checkAlert();
+  if (alert) {
+    const { chatId, threadId } = target(entry.conversationId);
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (token) {
+      try {
+        await send(token, chatId, threadId, alert);
+      } catch (error) {
+        console.error(`[stop-hook] ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
   // Arm only if nothing is listening. `stop_hook_active` means this turn is
   // itself the continuation a Stop hook asked for — injecting again from inside
   // it would ask forever if arming failed, turning a missing poller into a
@@ -91,7 +105,12 @@ async function mirrorReply(conversationId: string, text: string | undefined): Pr
   }
 
   const { chatId, threadId } = target(conversationId);
-  for (const chunk of chunkify(text)) {
+  const chunks = chunkify(text);
+  const suffix = await quotaSuffix();
+  if (suffix && chunks.length > 0) {
+    chunks[chunks.length - 1] += suffix;
+  }
+  for (const chunk of chunks) {
     try {
       await send(token, chatId, threadId, chunk);
     } catch (error) {

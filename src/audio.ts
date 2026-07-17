@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -30,8 +30,12 @@ export type AudioStatus =
 /** Newer whisper.cpp builds install `whisper-cli`; older ones called it `main`. */
 const WHISPER_BINARIES = ['whisper-cli', 'main', 'whisper'];
 
+/** Windows executables need the .exe suffix -- existsSync does no PATHEXT-style
+ *  resolution the way a shell would, so an extensionless lookup silently never
+ *  matches whisper-cli.exe/ffmpeg.exe even when they're right there. */
 function findIn(dir: string, names: readonly string[]): string | undefined {
-  return names.map((name) => join(dir, name)).find((path) => existsSync(path));
+  const candidates = process.platform === 'win32' ? names.flatMap((n) => [n, `${n}.exe`]) : names;
+  return candidates.map((name) => join(dir, name)).find((path) => existsSync(path));
 }
 
 function findModel(dir: string, configured?: string): string | undefined {
@@ -54,10 +58,11 @@ function findModel(dir: string, configured?: string): string | undefined {
 function findFfmpeg(dir: string): string | undefined {
   const local = findIn(dir, ['ffmpeg']);
   if (local) return local;
+  const names = process.platform === 'win32' ? ['ffmpeg.exe', 'ffmpeg'] : ['ffmpeg'];
   const fromPath = (process.env.PATH ?? '')
-    .split(':')
+    .split(delimiter)
     .filter(Boolean)
-    .map((p) => join(p, 'ffmpeg'))
+    .flatMap((p) => names.map((name) => join(p, name)))
     .find((p) => existsSync(p));
   return fromPath;
 }
