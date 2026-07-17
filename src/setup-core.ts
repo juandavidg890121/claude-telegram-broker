@@ -289,6 +289,24 @@ export const whisperBinaryUrl = (tag: string, asset: string): string =>
   `https://github.com/ggml-org/whisper.cpp/releases/download/${tag}/${asset}`;
 
 /**
+ * The whisper.cpp archive is a full build — whisper-cli plus whisper-server,
+ * the parakeet tools, benchmarks, and a dozen test binaries. Only `whisper-cli`
+ * and the shared libraries it loads are needed to transcribe, so the installer
+ * keeps just those and drops the rest.
+ *
+ * `binaryName` is `whisper-cli` (or `whisper-cli.exe` on Windows). A file is kept
+ * when it's that binary or a shared library (.so/.dll/.dylib, with or without a
+ * version suffix) — except the parakeet libraries, which whisper-cli never links
+ * (confirmed by ldd: only libwhisper, libggml and libggml-base, plus the
+ * libggml-cpu backends those load at runtime).
+ */
+export function whisperKeepFile(name: string, binaryName: string): boolean {
+  if (name === binaryName) return true;
+  if (name.startsWith('libparakeet')) return false;
+  return /\.(so|dll|dylib)(\.\d+)*$/i.test(name);
+}
+
+/**
  * A static ffmpeg, for the case where it isn't already on PATH. BtbN publishes
  * self-contained builds for Linux and Windows under a stable `latest` tag with
  * stable asset names, so no API call is needed. macOS isn't built there; it

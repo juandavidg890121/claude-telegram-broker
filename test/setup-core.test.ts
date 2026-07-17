@@ -35,6 +35,7 @@ import {
   ffmpegUrl,
   whisperBinaryAsset,
   whisperBinaryUrl,
+  whisperKeepFile,
   WHISPER_RELEASE,
 } from '../src/setup-core.js';
 import { execFileSync } from 'node:child_process';
@@ -368,6 +369,52 @@ describe('whisperBinaryAsset', () => {
       whisperBinaryUrl(WHISPER_RELEASE, 'whisper-bin-ubuntu-x64.tar.gz'),
       `https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_RELEASE}/whisper-bin-ubuntu-x64.tar.gz`,
     );
+  });
+});
+
+describe('whisperKeepFile', () => {
+  it('keeps whisper-cli and the shared libraries it loads', () => {
+    for (const name of [
+      'whisper-cli',
+      'libwhisper.so',
+      'libwhisper.so.1',
+      'libwhisper.so.1.9.1',
+      'libggml.so.0',
+      'libggml-base.so.0.15.1',
+      'libggml-cpu-haswell.so',
+      'libggml-cpu-sapphirerapids.so',
+    ]) {
+      assert.equal(whisperKeepFile(name, 'whisper-cli'), true, name);
+    }
+  });
+
+  it('drops the extra binaries, tests, licence and parakeet libs', () => {
+    for (const name of [
+      'whisper-server',
+      'whisper-bench',
+      'whisper-quantize',
+      'whisper-vad-speech-segments',
+      'parakeet-cli',
+      'parakeet-quantize',
+      'libparakeet.so',
+      'libparakeet.so.1.9.1',
+      'bench',
+      'main',
+      'test-vad',
+      'test-parakeet-full-jfk',
+      'LICENSE',
+    ]) {
+      assert.equal(whisperKeepFile(name, 'whisper-cli'), false, name);
+    }
+  });
+
+  it('matches the Windows binary and dll libraries', () => {
+    assert.equal(whisperKeepFile('whisper-cli.exe', 'whisper-cli.exe'), true);
+    assert.equal(whisperKeepFile('whisper.dll', 'whisper-cli.exe'), true);
+    assert.equal(whisperKeepFile('ggml-base.dll', 'whisper-cli.exe'), true);
+    // The posix binary name must not slip through on Windows.
+    assert.equal(whisperKeepFile('whisper-cli', 'whisper-cli.exe'), false);
+    assert.equal(whisperKeepFile('whisper-cli.exe', 'whisper-cli'), false);
   });
 });
 

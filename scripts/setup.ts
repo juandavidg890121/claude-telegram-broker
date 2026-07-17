@@ -19,6 +19,7 @@ import {
   chmodSync,
   closeSync,
   copyFileSync,
+  cpSync,
   createWriteStream,
   existsSync,
   mkdirSync,
@@ -64,6 +65,7 @@ import {
   ffmpegUrl,
   whisperBinaryAsset,
   whisperBinaryUrl,
+  whisperKeepFile,
   WHISPER_MODELS,
   WHISPER_RELEASE,
   type DiscoveredGroup,
@@ -241,26 +243,41 @@ async function downloadModel(url: string, dest: string, expectedBytes: number): 
  * Download and unpack the prebuilt whisper.cpp binary for this platform, if one
  * exists, into `dir`. Returns whether it installed one.
  *
- * The whole archive is extracted, not just whisper-cli: it's a shared build, and
- * the binary's RUNPATH is `$ORIGIN`, so the .so/.dll siblings must sit next to
- * it — which is exactly where audioStatus and the broker then find it. macOS and
- * odd arches have no such asset and return false, leaving the caller to guide a
- * build.
+ * The archive is a full build — whisper-cli plus whisper-server, the parakeet
+ * tools, benchmarks and a dozen test binaries — so it's unpacked to a scratch dir
+ * and only whisper-cli and the shared libraries it loads are copied out (see
+ * whisperKeepFile). The binary's RUNPATH is `$ORIGIN`, so those .so/.dll siblings
+ * must sit next to it — which is exactly where audioStatus and the broker look.
+ * Symlinks in the lib set (libggml.so → …so.0 → …so.0.15.1) are copied verbatim,
+ * so the whole chain stays intact. Copying only into `dir` also means a model or
+ * ffmpeg already there is never touched. macOS and odd arches have no such asset
+ * and return false, leaving the caller to guide a build.
  */
 async function installWhisperBinary(dir: string): Promise<boolean> {
   const target = whisperBinaryAsset(process.platform, process.arch);
   if (!target) return false;
 
+  const binaryName = process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli';
   const tag = await latestWhisperTag();
   const archive = join(dir, `.whisper-${target.asset}`);
   say(`    Downloading whisper-cli (${tag}, ${target.asset})…`);
   await streamDownload(whisperBinaryUrl(tag, target.asset), archive, 10_000_000);
+
+  const scratch = mkdtempSync(join(dir, '.whisper-unpack-'));
   try {
     // tar handles both .tar.gz (GNU tar) and .zip (bsdtar, shipped on Windows 10+).
-    // --strip-components=1 drops the archive's top-level folder.
-    execFileSync('tar', ['-xf', archive, '-C', dir, '--strip-components=1'], { stdio: 'ignore' });
+    execFileSync('tar', ['-xf', archive, '-C', scratch], { stdio: 'ignore' });
+    // The build unpacks to a single top folder holding the binary and its libs.
+    const top = join(scratch, readdirSync(scratch)[0]);
+    for (const name of readdirSync(top)) {
+      if (!whisperKeepFile(name, binaryName)) continue;
+      // dereference:false keeps the versioned symlinks as symlinks.
+      cpSync(join(top, name), join(dir, name), { force: true, dereference: false, verbatimSymlinks: true });
+    }
+    if (process.platform !== 'win32') chmodSync(join(dir, binaryName), 0o755);
   } finally {
     rmSync(archive, { force: true });
+    rmSync(scratch, { recursive: true, force: true });
   }
   return true;
 }
@@ -352,10 +369,17 @@ async function setUpAudio(answers: SetupAnswers): Promise<void> {
     }
   }
 
-  // ffmpeg — only if it's genuinely missing (audioStatus already accepts one on
-  // PATH), and only where a static build exists to fetch.
-  if (missingPiece(dir, 'ffmpeg') && ffmpegAsset(process.platform, process.arch)) {
-    if (await yes('    ffmpeg isn\'t on your PATH — download a static build (~120 MB)?', true)) {
+  // ffmpeg — the broker will use one on PATH, but a copy inside the folder makes
+  // the install self-contained and independent of the daemon's PATH. Offer it
+  // whenever the folder itself lacks one (and a static build exists): default on
+  // when it isn't on PATH (needed to transcode at all), off when PATH already has
+  // one (a portability nicety the user can decline).
+  if (!ffmpegInFolder(dir) && ffmpegAsset(process.platform, process.arch)) {
+    const onPath = !missingPiece(dir, 'ffmpeg');
+    const prompt = onPath
+      ? '    ffmpeg is on your PATH — also keep a copy in this folder so it works regardless of PATH (~120 MB)?'
+      : "    ffmpeg isn't on your PATH — download a static build (~120 MB)?";
+    if (await yes(prompt, !onPath)) {
       try {
         await installFfmpeg(dir);
         say(`    ${dim('✓')} ffmpeg installed`);
@@ -377,6 +401,14 @@ async function setUpAudio(answers: SetupAnswers): Promise<void> {
 function missingPiece(dir: string, piece: 'binary' | 'ffmpeg'): boolean {
   const status = audioStatus(dir);
   return status.state === 'incomplete' && status.missing.some((m) => m.includes(piece));
+}
+
+/** Whether ffmpeg sits in `dir` itself — as opposed to only on PATH. A folder
+ *  copy is what makes the whisper install self-contained and independent of
+ *  whatever PATH the broker daemon happens to run with. */
+function ffmpegInFolder(dir: string): boolean {
+  const name = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+  return existsSync(join(dir, name));
 }
 
 /** Say what's ready and what still needs a hand, reusing the broker's own check. */
@@ -743,8 +775,10 @@ async function runApply(file: string): Promise<void> {
         say(`⚠️  model downloaded, but the binary didn't: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    // ffmpeg the same way — only when it's actually missing (not on PATH).
-    if (plan.whisper.installFfmpeg !== false && missingPiece(dir, 'ffmpeg') && ffmpegAsset(process.platform, process.arch)) {
+    // ffmpeg: co-locate a copy whenever the folder lacks one, so the install is
+    // self-contained rather than leaning on the daemon's PATH (installFfmpeg:false
+    // opts out — e.g. deliberately relying on a system ffmpeg).
+    if (plan.whisper.installFfmpeg !== false && !ffmpegInFolder(dir) && ffmpegAsset(process.platform, process.arch)) {
       try {
         await installFfmpeg(dir);
       } catch (error) {
