@@ -1,0 +1,12 @@
+{
+  "token": "123456789:AA-your-bot-token-from-botfather",
+  "allowedUsers": ["123456789"],
+  "groupId": "-1001234567890",
+  "defaultCwd": null,
+  "model": null,
+  "permissionMode": null,
+  "whisper": null,
+  "output": "env",
+  "shell": "posix",
+  "installHooks": true
+}

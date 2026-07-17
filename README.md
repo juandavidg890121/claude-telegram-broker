@@ -57,11 +57,40 @@ At the end you choose where the config goes: a **`.env` file** (written `0600`,
 the broker reads it automatically) or **shell `export` commands** it prints for
 you to run — with the right syntax for your platform, whether that's `export` on
 Linux/macOS, `$env:` in PowerShell, or `set` in cmd. It reads the token hidden,
-so it never lands in scrollback. As a plugin, `/telegram-broker:setup` builds it
-and launches it for you; the prompts appear in your terminal either way.
+so it never lands in scrollback.
 
 > Run it as `pnpm configure`, not `pnpm setup` — `setup` is a built-in pnpm
 > command and would run instead of this one.
+
+**Two ways to run it:**
+
+- **`pnpm configure`** — the interactive installer, in *your* terminal. It reads
+  the token hidden, so nothing sensitive touches scrollback or any transcript.
+  This is the direct path; Claude is not involved.
+- **`/telegram-broker:setup`** — the plugin skill. Editor-hosted Claude sessions
+  (VS Code, etc.) have no terminal the installer can prompt through, so instead
+  Claude asks you here in the chat, then applies the answers non-interactively
+  with `pnpm configure --apply <plan.json>`. Convenient, but the bot token passes
+  through the conversation — if you'd rather it didn't, use `pnpm configure`.
+
+The `--apply` plan is a small JSON file; [`broker-plan.example.json`](broker-plan.example.json)
+is the full shape:
+
+| Field | |
+|---|---|
+| `token` | bot token (required) |
+| `allowedUsers` | array of numeric user ids (required, ≥1) |
+| `groupId` | forum group id, or `null` for single-chat mode |
+| `defaultCwd` | working directory `/new` starts in, or `null` for home |
+| `model` | model id for new sessions, or `null` for Claude Code's default |
+| `permissionMode` | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions`, or `null` |
+| `whisper` | `{ "model": "base", "dir": "…", "language": "auto" }` for voice notes, or `null` |
+| `output` | `"env"` to write `.env`, or `"export"` to print shell commands |
+| `shell` | for `output: "export"` — `"posix"` / `"powershell"` / `"cmd"` |
+| `installHooks` | `true` to merge the `/watch` hooks into `settings.json` |
+
+Every field is validated before anything is written, and the plan file — which
+holds the token — is deleted the moment it's read.
 
 It still can't do the parts that live inside Telegram — creating the bot,
 turning privacy mode off, making the group — so it walks you through those and

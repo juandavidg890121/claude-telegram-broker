@@ -91,7 +91,20 @@ function openTerminal(): { input: NodeJS.ReadStream; output: NodeJS.WriteStream 
   return { input: stdin, output: stdout };
 }
 
-const term = openTerminal();
+/**
+ * `--apply <file>` runs non-interactively: read a plan of answers, do all the
+ * writing, prompt for nothing. It exists for the /telegram-broker:setup skill,
+ * which runs us through Claude in an environment with no usable terminal — the
+ * interactive path can't get input there, so Claude collects the answers in the
+ * conversation and hands them over as a file instead.
+ */
+const applyFile = ((): string | undefined => {
+  const i = process.argv.indexOf('--apply');
+  return i !== -1 ? process.argv[i + 1] : undefined;
+})();
+
+// Apply mode never prompts, so it must not grab /dev/tty — plain stdout is right.
+const term = applyFile ? { input: stdin, output: stdout } : openTerminal();
 const rl = createInterface({ input: term.input, output: term.output });
 const say = (line = ''): void => void term.output.write(line + '\n');
 const bold = (s: string): string => `\x1b[1m${s}\x1b[0m`;
@@ -545,6 +558,73 @@ function installHooks(): void {
   say(dim('  Restart any open Claude session for them to load.'));
 }
 
+/** A plan handed to `--apply`: the same answers the interview collects, already
+ *  decided. Every field is still validated before anything is written. */
+type ApplyPlan = {
+  token: string;
+  allowedUsers: string[];
+  groupId?: string;
+  defaultCwd?: string;
+  model?: string;
+  permissionMode?: string;
+  output?: 'env' | 'export';
+  shell?: Shell;
+  installHooks?: boolean;
+  whisper?: { model?: string; dir: string; language?: string };
+};
+
+/**
+ * Apply a plan without prompting, validating every field exactly as the
+ * interactive path does — a plan Claude assembled from a chat is no more trusted
+ * than something typed, so a bad model or a missing directory is still caught
+ * here, not at the broker's next start.
+ *
+ * The plan file holds the token, so it is deleted the moment it's read.
+ */
+async function runApply(file: string): Promise<void> {
+  const plan = JSON.parse(readFileSync(file, 'utf8')) as ApplyPlan;
+  rmSync(file, { force: true }); // it carried the token; don't leave it lying around
+
+  const users = (plan.allowedUsers ?? []).map((id) => validateUserId(String(id)));
+  if (users.length === 0) throw new Error('The plan needs at least one allowed user id.');
+
+  const answers: SetupAnswers = {
+    token: validateToken(plan.token),
+    allowedUsers: [...new Set(users)],
+    groupId: plan.groupId ? normalizeGroupId(String(plan.groupId)) : undefined,
+    defaultCwd: plan.defaultCwd ? existingDir(String(plan.defaultCwd)) : undefined,
+    model: plan.model ? validateModelId(String(plan.model)) : undefined,
+    permissionMode:
+      plan.permissionMode && plan.permissionMode !== 'default' ? validatePermissionMode(String(plan.permissionMode)) : undefined,
+  };
+
+  if (plan.whisper?.dir) {
+    const model = validateModelChoice(plan.whisper.model ?? 'base');
+    const dir = writableDir(String(plan.whisper.dir));
+    answers.whisperDir = dir;
+    if (plan.whisper.language) {
+      const lang = validateLanguage(plan.whisper.language);
+      if (lang !== 'auto') answers.whisperLanguage = lang;
+    }
+    const dest = join(dir, modelFilename(model.name));
+    if (!existsSync(dest) || statSync(dest).size < model.sizeMB * 700_000) {
+      say(`Downloading ${modelFilename(model.name)} (~${model.sizeMB} MB)…`);
+      await downloadModel(modelUrl(model.name), dest, model.sizeMB * 1_000_000);
+    }
+    reportAudioReadiness(dir);
+  }
+
+  if (plan.output === 'export') {
+    say(renderExports(answers, plan.shell ?? 'posix'));
+  } else {
+    writeSecret(envPath, renderEnv(answers));
+    say(`✓ wrote ${envPath}`);
+  }
+
+  if (plan.installHooks !== false) installHooks();
+  say('✓ setup applied.');
+}
+
 let finished = false;
 
 // If stdin closes while a prompt is pending — EOF, piped input running out —
@@ -552,14 +632,14 @@ let finished = false;
 // Node's "unsettled top-level await" path with a confusing code. Turn that into
 // a clean, explained exit instead.
 rl.once('close', () => {
-  if (!finished) {
+  if (!finished && !applyFile) {
     say('\n  ⚠️  Input closed before setup finished. Run it again in a terminal.');
     process.exit(1);
   }
 });
 
 try {
-  await main();
+  await (applyFile ? runApply(applyFile) : main());
   finished = true;
 } catch (error) {
   finished = true;
