@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, utimesSync, writeFileSync, closeSync, openSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { CLAUDE_HOME } from './claude-home.js';
 
 /**
  * The file handoff behind /watch: Telegram writes messages here, a poller armed
@@ -13,8 +13,7 @@ import { join } from 'node:path';
  * would clear the other's liveness. The session id in the path makes both
  * impossible rather than unlikely.
  */
-export const MIRROR_ROOT =
-  process.env.BROKER_MIRROR_DIR ?? join(homedir(), '.claude', 'telegram_mirror');
+export const MIRROR_ROOT = process.env.BROKER_MIRROR_DIR ?? join(CLAUDE_HOME, 'telegram_mirror');
 
 /**
  * How long a heartbeat may go untouched before its session counts as gone. The

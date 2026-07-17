@@ -1,22 +1,30 @@
 import { Bot, InlineKeyboard, type Context, type Filter } from 'grammy';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { CommandHandler, Frontend, Inbound, PermissionAsk } from './frontend.js';
+import { CLAUDE_HOME } from './claude-home.js';
 import { config } from './config.js';
 import { chunkify } from './chunk.js';
 import { audioStatus, transcribe } from './audio.js';
 
-/** Photos land here for Claude's Read tool to pick up. Not under the /watch
- *  mirror directory: those are keyed by session id and cleaned per session,
- *  while a photo belongs to whichever conversation received it. */
-const PHOTOS_DIR = join(homedir(), '.claude', 'telegram_photos');
+/**
+ * Photos land here for Claude's Read tool to pick up.
+ *
+ * A sibling of the /watch mirror rather than something under BROKER_MIRROR_DIR,
+ * which is tempting because both are broker-owned state. That variable is not a
+ * data directory: it names the handoff channel the broker and the poller inside
+ * the watched session must agree on, which is why the README says to change it
+ * for both or neither. Photos need no such agreement — only this process writes
+ * them, and Claude is handed the absolute path. Hanging them off that variable
+ * would only mean a misconfigured /watch also loses your photos.
+ */
+const PHOTOS_DIR = join(CLAUDE_HOME, 'telegram_photos');
 
 /** Voice notes, deleted as soon as they are transcribed — the text is the
  *  artefact, and a recording of your voice is not something to leave lying
- *  around. */
-const AUDIO_DIR = join(homedir(), '.claude', 'telegram_audio');
+ *  around. Barely a directory: nothing here outlives the transcription. */
+const AUDIO_DIR = join(CLAUDE_HOME, 'telegram_audio');
 
 type Pending = { resolve: (allowed: boolean) => void };
 

@@ -8,6 +8,7 @@ import {
   listSessions,
   type SDKSessionInfo,
 } from '@anthropic-ai/claude-agent-sdk';
+import { CLAUDE_HOME } from './claude-home.js';
 import { config } from './config.js';
 import { Registry } from './registry.js';
 import { PERMISSION_MODES, SessionManager } from './sessions.js';
@@ -169,8 +170,8 @@ function parseSessionArgs(args: string): { sessionId: string; cwd?: string; titl
  */
 function hookInstalled(): boolean {
   return [
-    join(homedir(), '.claude', 'settings.json'),
-    join(homedir(), '.claude', 'settings.local.json'),
+    join(CLAUDE_HOME, 'settings.json'),
+    join(CLAUDE_HOME, 'settings.local.json'),
   ].some((file) => {
     try {
       return readFileSync(file, 'utf8').includes('stop-hook');
