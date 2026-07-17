@@ -168,6 +168,104 @@ export function renderEnv(answers: SetupAnswers): string {
   return lines.join('\n') + '\n';
 }
 
+/**
+ * Permission modes the broker accepts, mirrored from sessions.ts's
+ * PERMISSION_MODES — which can't be imported here because it pulls in config.ts,
+ * and config.ts throws at import without the broker's own env, which is exactly
+ * what setup runs *before* exists. A test guards the two lists against drift.
+ */
+export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions'] as const;
+
+export function validatePermissionMode(raw: string): string {
+  const mode = raw.trim();
+  if (!(PERMISSION_MODES as readonly string[]).includes(mode)) {
+    throw new Error(`"${raw}" is not a permission mode. Pick one of: ${PERMISSION_MODES.join(', ')}.`);
+  }
+  return mode;
+}
+
+/** A Claude model id: no spaces, and not an accidental sentence. */
+export function validateModelId(raw: string): string {
+  const model = raw.trim();
+  if (/\s/.test(model)) throw new Error(`"${raw}" doesn't look like a model id — those have no spaces, e.g. claude-opus-4-8.`);
+  return model;
+}
+
+/** A whisper language: the two-letter code, or 'auto' to detect per message. */
+export function validateLanguage(raw: string): string {
+  const lang = raw.trim().toLowerCase();
+  if (lang !== 'auto' && !/^[a-z]{2}$/.test(lang)) {
+    throw new Error(`"${raw}" is not a language — use a two-letter code like es or en, or auto.`);
+  }
+  return lang;
+}
+
+/** Expand a leading ~ to the home directory; leave every other path untouched. */
+export function expandHome(path: string, home: string): string {
+  return path.replace(/^~(?=$|[/\\])/, home);
+}
+
+export type WhisperModel = { name: string; sizeMB: number; when: string };
+
+/**
+ * The models worth offering, from the README's table. Multilingual only: the
+ * `.en` variants are byte-for-byte the same size, trivial to pick by mistake
+ * while scanning sizes, and mishear every non-English word with no error — so
+ * they are simply not on the menu.
+ */
+export const WHISPER_MODELS: readonly WhisperModel[] = [
+  { name: 'base', sizeMB: 148, when: 'CPU — start here' },
+  { name: 'small', sizeMB: 488, when: 'CPU, if base mishears you' },
+  { name: 'large-v3-turbo', sizeMB: 1620, when: 'GPU builds' },
+  { name: 'large-v3', sizeMB: 3100, when: 'GPU, and only for translate mode' },
+];
+
+export const modelFilename = (name: string): string => `ggml-${name}.bin`;
+
+/** Where the README says the models live — HuggingFace, the resolve (raw) path. */
+export const modelUrl = (name: string): string =>
+  `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${modelFilename(name)}`;
+
+/**
+ * Resolve a model the user named to one we know how to fetch. Rejects the `.en`
+ * models by name — someone who types one meant the multilingual one — and
+ * anything not in the catalog, rather than build a URL to a 404.
+ */
+export function validateModelChoice(raw: string): WhisperModel {
+  const name = raw.trim().replace(/^ggml-/, '').replace(/\.bin$/, '');
+  if (name.endsWith('.en')) {
+    throw new Error(`${name} is English-only and mishears everything else — use ${name.replace(/\.en$/, '')}.`);
+  }
+  const model = WHISPER_MODELS.find((m) => m.name === name);
+  if (!model) throw new Error(`Unknown model "${raw}". Choose one of: ${WHISPER_MODELS.map((m) => m.name).join(', ')}.`);
+  return model;
+}
+
+/**
+ * Reject a finished download that isn't plausibly a model.
+ *
+ * A 404 or a redirect to a login page comes back as HTML or JSON with a 200,
+ * and saved as ggml-base.bin it fails much later as "model unusable" with
+ * nothing naming the real cause. `firstByte` catches the web page (`<` or `{`);
+ * `seen` vs `expected` catches a truncated or wrong-file download. Kept pure so
+ * the check that matters most is tested without pulling a model over the wire.
+ */
+export function assertPlausibleModel(firstByte: number, seen: number, expected: number): void {
+  if (seen < expected * 0.7) {
+    throw new Error(`only got ${formatSize(seen)} of an expected ~${formatSize(expected)} — the download looks truncated or wrong.`);
+  }
+  if (firstByte === 0x3c || firstByte === 0x7b) {
+    throw new Error('the download was a web page, not a model — check the model name and your connection.');
+  }
+}
+
+/** A byte count as MB/GB, for download sizes and progress. */
+export function formatSize(bytes: number): string {
+  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(2)} GB`;
+  if (bytes >= 1_000_000) return `${Math.round(bytes / 1_000_000)} MB`;
+  return `${Math.round(bytes / 1_000)} KB`;
+}
+
 export const MAX_TRIES = 3;
 
 /**

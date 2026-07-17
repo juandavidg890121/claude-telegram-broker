@@ -47,6 +47,12 @@ merge the `/watch` hooks into `~/.claude/settings.json` with a backup. It asks
 whether required fields can be skipped — they can't: press Enter past one and it
 re-asks, giving up after three tries rather than writing a broken config.
 
+If you opt into voice notes, it downloads a whisper model into a directory you
+choose (from the same menu the manual steps below describe) and then reports
+whether the `whisper.cpp` binary and `ffmpeg` are present, pointing you at how to
+get whichever is missing — it can't reliably build the binary for you, but it
+does the tedious model download and the wiring.
+
 At the end you choose where the config goes: a **`.env` file** (written `0600`,
 the broker reads it automatically) or **shell `export` commands** it prints for
 you to run — with the right syntax for your platform, whether that's `export` on

@@ -32,6 +32,13 @@ your Bash tool and answer its prompts yourself.** Instead:
    - **Optionally a forum group** (Topics enabled, bot added as admin with
      *Manage Topics*) for the one-topic-per-session workflow. Skipping it runs
      the broker in a single chat instead.
+   - **Optionally voice notes**: if they say yes, it downloads a whisper model
+     into a directory they choose and reports whether the whisper.cpp binary and
+     ffmpeg are present, pointing at how to get whichever is missing. The model
+     download can be large (148 MB and up), so they'll want a decent connection.
+   - Every answer is validated as they go, and required fields can't be skipped:
+     press Enter past one three times and setup stops rather than write a broken
+     config.
 
 3. The token is a secret and grants control of the bot; the allowlist grants
    running commands on this machine. The installer keeps the token out of the

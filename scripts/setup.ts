@@ -15,22 +15,49 @@
  * this terminal's scrollback, and running this here rather than through Claude
  * keeps it out of any conversation transcript too.
  */
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  copyFileSync,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { stdin, stdout } from 'node:process';
+import { execFileSync } from 'node:child_process';
+import { audioStatus } from '../src/audio.js';
 import { buildHookConfig, mergeHooks, tsxPath } from '../src/hooks-config.js';
 import {
   collectRequired,
+  expandHome,
+  assertPlausibleModel,
+  formatSize,
+  modelFilename,
+  modelUrl,
   normalizeGroupId,
   parseGetMe,
   parseUpdates,
   renderEnv,
   renderExports,
+  validateLanguage,
+  validateModelChoice,
+  validateModelId,
+  validatePermissionMode,
   validateToken,
   validateUserId,
+  WHISPER_MODELS,
   type DiscoveredGroup,
   type DiscoveredUser,
   type SetupAnswers,
@@ -62,6 +89,176 @@ function required<T>(label: string, read: () => Promise<string>, validate: (raw:
     const left = triesLeft > 0 ? dim(` (${triesLeft} more)`) : '';
     say(`  ⚠️  ${label}: ${message}${left}`);
   });
+}
+
+/**
+ * An optional answer that is still validated when given: Enter accepts the
+ * default (or skips), anything else must pass `validate` or it re-asks. So
+ * "optional" means "may be left blank", never "may be wrong" — a typo'd model
+ * or permission mode is caught here, not at the broker's next start.
+ */
+async function optional<T>(
+  question: string,
+  validate: (raw: string) => T,
+  fallback = '',
+): Promise<T | undefined> {
+  for (;;) {
+    const raw = await ask(question, fallback);
+    if (!raw) return undefined;
+    try {
+      return validate(raw);
+    } catch (error) {
+      say(`  ⚠️  ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+/** An existing directory, ~ expanded. Used for a working directory that must
+ *  already be there — creating it silently would hide a typo. */
+function existingDir(raw: string): string {
+  const path = expandHome(raw.trim(), homedir());
+  if (!statSync(path, { throwIfNoEntry: false })?.isDirectory()) {
+    throw new Error(`"${raw}" is not an existing directory.`);
+  }
+  return path;
+}
+
+/** Create the directory if needed and prove we can actually write to it —
+ *  a read-only or bad path should fail here, before a long download, not after. */
+function writableDir(raw: string): string {
+  const path = expandHome(raw.trim(), homedir());
+  mkdirSync(path, { recursive: true });
+  const probe = join(path, `.setup-write-test-${process.pid}`);
+  try {
+    closeSync(openSync(probe, 'w'));
+    rmSync(probe, { force: true });
+  } catch {
+    throw new Error(`Can't write to "${path}" — pick a directory you own.`);
+  }
+  return path;
+}
+
+/**
+ * Download a model to `dest`, streaming with a progress line, and refuse
+ * anything that isn't plausibly a model.
+ *
+ * Downloads land in a `.part` file renamed only on success, so an interrupted
+ * download can't be mistaken for a finished one. The size and first-bytes checks
+ * are there because a 404 or a redirect to a login page comes back as HTML with
+ * a 200, and saved as `ggml-base.bin` it would fail much later as "model unusable"
+ * with nothing pointing at the actual cause.
+ */
+async function downloadModel(url: string, dest: string, expectedBytes: number): Promise<void> {
+  const response = await fetch(url);
+  if (!response.ok || !response.body) throw new Error(`download failed: HTTP ${response.status}`);
+
+  const total = Number(response.headers.get('content-length')) || expectedBytes;
+  const part = `${dest}.part`;
+  const file = createWriteStream(part);
+  let seen = 0;
+  let lastShown = 0;
+
+  try {
+    for await (const chunk of Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0])) {
+      file.write(chunk);
+      seen += (chunk as Buffer).length;
+      if (seen - lastShown > 2_000_000 || seen === total) {
+        const pct = total ? ` (${Math.round((seen / total) * 100)}%)` : '';
+        stdout.write(`\r    ↓ ${formatSize(seen)}${pct}   `);
+        lastShown = seen;
+      }
+    }
+    await new Promise<void>((resolve, reject) => file.end((err?: Error | null) => (err ? reject(err) : resolve())));
+    stdout.write('\n');
+
+    const head = Buffer.alloc(1);
+    const fd = openSync(part, 'r');
+    try {
+      readSync(fd, head, 0, 1, 0);
+    } finally {
+      closeSync(fd);
+    }
+    assertPlausibleModel(head[0], seen, expectedBytes);
+    renameSync(part, dest);
+  } catch (error) {
+    file.destroy();
+    rmSync(part, { force: true });
+    throw error;
+  }
+}
+
+/**
+ * The voice-note path: pick a model, get a writable directory, download the
+ * model if it isn't already there, and report what's still missing — the binary
+ * this can't reliably build, and ffmpeg — reusing the broker's own audioStatus
+ * so setup and the running broker agree on "ready".
+ */
+async function setUpAudio(answers: SetupAnswers): Promise<void> {
+  say('\n    Models — pick by where whisper runs, not by quality:');
+  for (const m of WHISPER_MODELS) say(`      ${m.name}  ${dim(`${m.sizeMB} MB — ${m.when}`)}`);
+  const model = (await optional('    Which model?', validateModelChoice, 'base')) ?? validateModelChoice('base');
+
+  const dir = await required(
+    'Whisper directory',
+    () => ask('    Directory to install into', join(homedir(), '.claude', 'whisper')),
+    writableDir,
+  );
+  answers.whisperDir = dir;
+
+  const dest = join(dir, modelFilename(model.name));
+  if (existsSync(dest) && statSync(dest).size > model.sizeMB * 700_000) {
+    say(`    ${dim('✓')} ${modelFilename(model.name)} already there — skipping download`);
+  } else {
+    say(`    Downloading ${modelFilename(model.name)} ${dim(`(~${model.sizeMB} MB)`)}…`);
+    await downloadModel(modelUrl(model.name), dest, model.sizeMB * 1_000_000);
+    say(`    ${dim('✓')} model saved to ${dest}`);
+  }
+
+  answers.whisperLanguage = await optional('    Spoken language (two-letter code) or Enter to auto-detect', validateLanguage, 'auto').then(
+    (lang) => (lang && lang !== 'auto' ? lang : undefined),
+  );
+
+  reportAudioReadiness(dir);
+}
+
+/** Say what's ready and what still needs a hand, reusing the broker's own check. */
+function reportAudioReadiness(dir: string): void {
+  const status = audioStatus(dir);
+  if (status.state === 'ready') {
+    say(`    ${dim('✓')} audio is ready — binary, model and ffmpeg all present.`);
+    return;
+  }
+  if (status.state !== 'incomplete') return;
+
+  for (const missing of status.missing) {
+    if (missing.includes('binary')) {
+      say(`    ${dim('!')} whisper.cpp binary not found in ${dir}.`);
+      if (process.platform === 'darwin' && onPath('brew')) {
+        say('      Install it with: ' + bold('brew install whisper-cpp') + ', then copy whisper-cli here.');
+      } else {
+        say('      Build it (needs cmake + a C++ compiler), see the README "Voice notes" section:');
+        say(dim('        git clone --depth 1 https://github.com/ggml-org/whisper.cpp && cd whisper.cpp'));
+        say(dim('        cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF'));
+        say(dim('        cmake --build build -j --config Release'));
+        say(dim(`        cp build/bin/whisper-cli ${dir}/`));
+      }
+    } else if (missing.includes('ffmpeg')) {
+      const how =
+        process.platform === 'darwin' ? 'brew install ffmpeg' : process.platform === 'win32' ? 'winget install ffmpeg' : 'apt install ffmpeg';
+      say(`    ${dim('!')} ffmpeg not found — install it: ${bold(how)}`);
+    }
+  }
+  say(dim('    Voice notes turn on automatically once the binary is in place; nothing else to configure.'));
+}
+
+/** Is a command on PATH? Used only to tailor a hint, so a false "no" is harmless. */
+function onPath(cmd: string): boolean {
+  try {
+    execFileSync(process.platform === 'win32' ? 'where' : 'which', [cmd], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function yes(question: string, defaultYes = false): Promise<boolean> {
@@ -206,19 +403,22 @@ async function main(): Promise<void> {
   // 4. Optional --------------------------------------------------------------
   const answers: SetupAnswers = { token, allowedUsers: allowed, groupId };
   if (await yes(bold('  4. Configure advanced options') + ' (model, permissions, voice notes)?', false)) {
-    const cwd = await ask('\n  Default working directory for /new', homedir());
-    if (cwd !== homedir()) answers.defaultCwd = cwd;
+    const cwd = await optional('\n  Default working directory for /new', existingDir, homedir());
+    if (cwd && cwd !== homedir()) answers.defaultCwd = cwd;
 
-    const model = await ask('  Model for new sessions, or Enter for the default:');
-    if (model) answers.model = model;
+    answers.model = await optional('  Model for new sessions, or Enter for the default:', validateModelId);
 
-    const mode = await ask('  Permission mode (default / acceptEdits / plan / bypassPermissions)', 'default');
-    if (mode !== 'default') answers.permissionMode = mode;
+    answers.permissionMode = await optional(
+      '  Permission mode (default / acceptEdits / plan / bypassPermissions)',
+      (raw) => {
+        const mode = validatePermissionMode(raw);
+        return mode === 'default' ? undefined : mode; // default is the default; no need to write it
+      },
+      'default',
+    );
 
     if (await yes('  Enable voice notes (needs a local whisper.cpp)?', false)) {
-      answers.whisperDir = await ask('    Directory holding whisper-cli and a ggml-*.bin model:');
-      const lang = await ask('    Spoken language, or Enter to auto-detect', 'auto');
-      if (lang !== 'auto') answers.whisperLanguage = lang;
+      await setUpAudio(answers);
     }
     say('');
   }

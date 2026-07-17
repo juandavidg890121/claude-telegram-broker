@@ -10,15 +10,28 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   MAX_TRIES,
+  PERMISSION_MODES,
+  WHISPER_MODELS,
+  assertPlausibleModel,
   collectRequired,
+  expandHome,
+  formatSize,
+  modelFilename,
+  modelUrl,
   normalizeGroupId,
   parseGetMe,
   parseUpdates,
   renderEnv,
   renderExports,
+  validateLanguage,
+  validateModelChoice,
+  validateModelId,
+  validatePermissionMode,
   validateToken,
   validateUserId,
 } from '../src/setup-core.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 describe('validateToken', () => {
   it('accepts a real-shaped token, trimmed', () => {
@@ -206,6 +219,112 @@ describe('renderExports', () => {
     assert.match(renderExports(tricky, 'posix'), /export TELEGRAM_BOT_TOKEN='a'\\''b'/);
     assert.match(renderExports(tricky, 'powershell'), /\$env:TELEGRAM_BOT_TOKEN = 'a''b'/);
     assert.match(renderExports({ token: 'a%b', allowedUsers: ['1'] }, 'cmd'), /set "TELEGRAM_BOT_TOKEN=a%%b"/);
+  });
+});
+
+describe('validatePermissionMode', () => {
+  it('accepts each real mode', () => {
+    for (const mode of PERMISSION_MODES) assert.equal(validatePermissionMode(mode), mode);
+  });
+
+  it('rejects anything else with the list', () => {
+    assert.throws(() => validatePermissionMode('yolo'), /default, acceptEdits/);
+  });
+
+  it('stays in step with the broker own PERMISSION_MODES', () => {
+    // Read as text rather than imported: sessions.ts pulls in config.ts, which
+    // throws at import without the broker's env. This guards the copy against
+    // the original silently gaining or losing a mode.
+    const source = readFileSync(fileURLToPath(new URL('../src/sessions.ts', import.meta.url)), 'utf8');
+    const block = source.match(/PERMISSION_MODES[^=]*=\s*\[([^\]]*)\]/)?.[1] ?? '';
+    const brokerModes = [...block.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    assert.deepEqual([...PERMISSION_MODES], brokerModes);
+  });
+});
+
+describe('validateModelId', () => {
+  it('accepts a model id', () => {
+    assert.equal(validateModelId(' claude-opus-4-8 '), 'claude-opus-4-8');
+  });
+
+  it('rejects a value with spaces — that is a sentence, not an id', () => {
+    assert.throws(() => validateModelId('the best one'), /model id/);
+  });
+});
+
+describe('validateLanguage', () => {
+  it('accepts a two-letter code and auto', () => {
+    assert.equal(validateLanguage('ES'), 'es');
+    assert.equal(validateLanguage('auto'), 'auto');
+  });
+
+  it('rejects anything else', () => {
+    assert.throws(() => validateLanguage('spanish'), /language/);
+    assert.throws(() => validateLanguage('e'), /language/);
+  });
+});
+
+describe('expandHome', () => {
+  it('expands a leading ~ and nothing else', () => {
+    assert.equal(expandHome('~/whisper', '/home/me'), '/home/me/whisper');
+    assert.equal(expandHome('~', '/home/me'), '/home/me');
+    assert.equal(expandHome('/opt/~/x', '/home/me'), '/opt/~/x', 'a ~ mid-path is a real directory name');
+    assert.equal(expandHome('~user/x', '/home/me'), '~user/x', 'only bare ~ is home, not ~user');
+  });
+});
+
+describe('whisper model catalog', () => {
+  it('offers only multilingual models — never the .en traps', () => {
+    for (const model of WHISPER_MODELS) assert.doesNotMatch(model.name, /\.en$/);
+  });
+
+  it('builds the HuggingFace resolve url', () => {
+    assert.equal(modelUrl('base'), 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin');
+    assert.equal(modelFilename('large-v3-turbo'), 'ggml-large-v3-turbo.bin');
+  });
+});
+
+describe('validateModelChoice', () => {
+  it('accepts a known model, however it was typed', () => {
+    assert.equal(validateModelChoice('base').name, 'base');
+    assert.equal(validateModelChoice('ggml-base.bin').name, 'base', 'the filename form resolves too');
+  });
+
+  it('sends an .en choice back to the multilingual one', () => {
+    // The single most likely mistake, per the README, and its symptom is silent
+    // gibberish — so it is refused by name, not downloaded.
+    assert.throws(() => validateModelChoice('medium.en'), /English-only.*medium/);
+  });
+
+  it('rejects an unknown model instead of building a url to a 404', () => {
+    assert.throws(() => validateModelChoice('enormous'), /Unknown model/);
+  });
+});
+
+describe('assertPlausibleModel', () => {
+  const ggmlByte = 0x67; // 'g' — a real ggml file starts with "ggml"
+
+  it('passes a full-size binary download', () => {
+    assert.doesNotThrow(() => assertPlausibleModel(ggmlByte, 150_000_000, 148_000_000));
+  });
+
+  it('rejects an HTML or JSON error page saved as .bin', () => {
+    // A 404 or login redirect is a 200 with a web page body — the exact way a
+    // wrong model name fails without this guard.
+    assert.throws(() => assertPlausibleModel(0x3c /* < */, 150_000_000, 148_000_000), /web page/);
+    assert.throws(() => assertPlausibleModel(0x7b /* { */, 150_000_000, 148_000_000), /web page/);
+  });
+
+  it('rejects a truncated download', () => {
+    assert.throws(() => assertPlausibleModel(ggmlByte, 1_000, 148_000_000), /truncated or wrong/);
+  });
+});
+
+describe('formatSize', () => {
+  it('scales to KB, MB, GB', () => {
+    assert.equal(formatSize(148_000_000), '148 MB');
+    assert.equal(formatSize(1_620_000_000), '1.62 GB');
+    assert.equal(formatSize(5_000), '5 KB');
   });
 });
 
