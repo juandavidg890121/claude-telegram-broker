@@ -1,0 +1,59 @@
+import type { AskUserQuestionInput } from '@anthropic-ai/claude-agent-sdk/sdk-tools';
+
+/**
+ * Render an AskUserQuestion into the text a phone notification shows.
+ *
+ * Importable, rather than living inside the hook script: a hook is an entry
+ * point — it calls main() at the top level and reads real stdin on import — so
+ * anything worth testing has to live outside it. The alternative, copying the
+ * function into the test, tests the copy: the hook can then be changed to
+ * return anything at all and the suite stays green.
+ *
+ * The options are the point. AskUserQuestion exists to make you pick between
+ * concrete choices, so a notification with the question and not the options
+ * tells you a decision is waiting without telling you what it is — which is
+ * barely better than the silence this feature exists to replace.
+ */
+
+/**
+ * The shape is the SDK's own, not a hand-written guess, because a guess drifts
+ * silently: the copy this replaces declared `question` and `header` optional
+ * when the SDK requires both, and omitted `options` entirely — so the code was
+ * written against a payload that does not exist.
+ *
+ * The payload still arrives as JSON from outside the process, so the *values*
+ * are checked at runtime rather than trusted. The type says what to expect; it
+ * cannot promise the hook was handed it.
+ */
+type Question = AskUserQuestionInput['questions'][number];
+
+const MAX_OPTIONS_SHOWN = 4;
+
+function renderOptions(options: Question['options']): string {
+  const labels = options.map((option) => option.label).filter(Boolean);
+  if (labels.length === 0) return '';
+  // Labels only. The descriptions are often a sentence each, and four of those
+  // turn a glanceable notification into something you have to read — when the
+  // answer has to be typed in VS Code anyway.
+  const shown = labels.slice(0, MAX_OPTIONS_SHOWN);
+  const rest = labels.length - shown.length;
+  return `\n  ${shown.join(' / ')}${rest > 0 ? ` / +${rest} more` : ''}`;
+}
+
+export function summarize(input: Partial<AskUserQuestionInput> | undefined): string {
+  const questions = input?.questions ?? [];
+  // Defensive rather than decorative: this is parsed from a hook's stdin, so
+  // "the tool fired with no readable question" is a real state, and saying so
+  // beats a notification that is silently empty.
+  if (!Array.isArray(questions) || questions.length === 0) return '(no question text available)';
+
+  return questions
+    .map((question) => {
+      const header = question?.header ? `[${question.header}] ` : '';
+      const body = question?.question ?? '(untitled)';
+      const options = Array.isArray(question?.options) ? renderOptions(question.options) : '';
+      const multi = question?.multiSelect ? ' (pick any)' : '';
+      return `• ${header}${body}${multi}${options}`;
+    })
+    .join('\n');
+}

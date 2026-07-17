@@ -59,7 +59,7 @@ pnpm start
 Get your numeric user id from [@userinfobot](https://t.me/userinfobot).
 
 5. **Only if you want `/watch`** (relaying into a session you have open in VS
-   Code — `/new` and `/fork` need none of this): install two hooks, once, in
+   Code — `/new` and `/fork` need none of this): install three hooks, once, in
    `~/.claude/settings.json`.
 
    Print the block with real paths already filled in, from the checkout:
@@ -76,7 +76,9 @@ pnpm run print-hooks
     "Stop": [{ "hooks": [{ "type": "command", "command":
       "/abs/path/to/repo/node_modules/.bin/tsx --env-file-if-exists=/abs/path/to/repo/.env /abs/path/to/repo/scripts/mirror/stop-hook.ts" }] }],
     "SessionStart": [{ "hooks": [{ "type": "command", "command":
-      "/abs/path/to/repo/node_modules/.bin/tsx /abs/path/to/repo/scripts/mirror/session-start-hook.ts" }] }]
+      "/abs/path/to/repo/node_modules/.bin/tsx /abs/path/to/repo/scripts/mirror/session-start-hook.ts" }] }],
+    "PreToolUse": [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command":
+      "/abs/path/to/repo/node_modules/.bin/tsx --env-file-if-exists=/abs/path/to/repo/.env /abs/path/to/repo/scripts/mirror/ask-user-question-notify.ts" }] }]
   }
 }
 ```
@@ -92,6 +94,16 @@ pnpm run print-hooks
    `/watch` from your phone is the only thing you type. `SessionStart` catches
    sessions opened after you watched them; `Stop` catches sessions that were
    already open, at the end of their next turn.
+
+   The third is different: it tells you when the session is **waiting on you**.
+   Claude asking a multiple-choice question (`AskUserQuestion`) isn't a
+   permission prompt and never reaches the broker, so a question posed in a VS
+   Code window you aren't looking at just sits there — indistinguishable from
+   the session having finished. `PreToolUse` pushes the question and its options
+   to the topic the moment it's asked. You still answer in VS Code: nothing in
+   the SDK can inject a reply into a question already in flight. Pair it with
+   [`askUserQuestionTimeout`](https://code.claude.com/docs/en/settings) so a
+   question nobody ever answers doesn't block the session forever.
 
    **Use an absolute path, and point it at the same tree the broker runs from.**
    Three traps here.

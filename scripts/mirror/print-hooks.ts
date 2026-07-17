@@ -25,6 +25,15 @@ const config = {
   hooks: {
     Stop: [{ hooks: [{ type: 'command', command: command('stop-hook.ts', true) }] }],
     SessionStart: [{ hooks: [{ type: 'command', command: command('session-start-hook.ts', false) }] }],
+    // The matcher is what keeps this from firing on every tool call in every
+    // session. The hook checks tool_name too, but a config printed from here
+    // should not rely on the belt when it can print the braces.
+    PreToolUse: [
+      {
+        matcher: 'AskUserQuestion',
+        hooks: [{ type: 'command', command: command('ask-user-question-notify.ts', true) }],
+      },
+    ],
   },
 };
 
@@ -34,7 +43,7 @@ console.log(JSON.stringify(config, null, 2));
 // Check the paths now, here, rather than let them fail invisibly inside a hook.
 const problems = [
   !existsSync(tsx) && `tsx is missing at ${tsx} — run pnpm install first.`,
-  !existsSync(env) && `no .env at ${env} — the Stop hook needs TELEGRAM_BOT_TOKEN to send anything.`,
+  !existsSync(env) && `no .env at ${env} — the Stop and AskUserQuestion hooks need TELEGRAM_BOT_TOKEN to send anything.`,
 ].filter(Boolean);
 
 if (problems.length) {
