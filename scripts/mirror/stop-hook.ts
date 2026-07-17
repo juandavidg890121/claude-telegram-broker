@@ -24,27 +24,7 @@ import { findWatched } from '../../src/broker-state.js';
 import { heartbeatFresh } from '../../src/mirror.js';
 import { armInstruction } from '../../src/watch-arm.js';
 import { quotaSuffix, checkAlert } from '../../src/quota.js';
-
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-function target(conversationId: string): { chatId: string; threadId?: number } {
-  const [chatId, thread] = conversationId.split(':');
-  const threadId = Number(thread);
-  return { chatId, threadId: threadId > 0 ? threadId : undefined };
-}
-
-async function send(token: string, chatId: string, threadId: number | undefined, text: string): Promise<void> {
-  const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, message_thread_id: threadId }),
-  });
-  if (!response.ok) throw new Error(`sendMessage ${response.status}: ${await response.text()}`);
-}
+import { readStdin, target, send, notify } from '../../src/hook-telegram.js';
 
 async function main(): Promise<void> {
   const payload = JSON.parse(await readStdin()) as {
@@ -93,13 +73,15 @@ async function mirrorReply(conversationId: string, text: string | undefined): Pr
     return;
   }
 
+  // Chunked here rather than through notify(): the suffix has to be appended
+  // *after* the split so it always lands on the last chunk. Adding it before
+  // would let chunkify push it onto a page of its own — which is the separate
+  // message this design exists to avoid.
   const { chatId, threadId } = target(conversationId);
   const chunks = chunkify(text);
-  // Only the last chunk carries it, so a long reply reads as one answer with a
-  // footer rather than a quota reading stapled to every page. It rides along
-  // inside the chunk because chunkify's MAX_LEN leaves ~90 characters of head
-  // room under Telegram's real 4096 cap — enough for this line, which is why it
-  // does not need a message of its own.
+  // It rides along inside the chunk because chunkify's MAX_LEN leaves ~90
+  // characters of head room under Telegram's real 4096 cap — enough for this
+  // line, which is why it does not need a message of its own.
   const suffix = await quotaSuffix();
   if (suffix && chunks.length > 0) chunks[chunks.length - 1] += suffix;
 
@@ -125,12 +107,7 @@ async function mirrorAlert(conversationId: string): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!alert || !token) return;
 
-  const { chatId, threadId } = target(conversationId);
-  try {
-    await send(token, chatId, threadId, alert);
-  } catch (error) {
-    console.error(`[stop-hook] ${error instanceof Error ? error.message : String(error)}`);
-  }
+  await notify(conversationId, token, alert, 'stop-hook');
 }
 
 await main();
