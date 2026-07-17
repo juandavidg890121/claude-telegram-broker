@@ -31,6 +31,8 @@ import {
   stripSurroundingQuotes,
   validateToken,
   validateUserId,
+  ffmpegAsset,
+  ffmpegUrl,
   whisperBinaryAsset,
   whisperBinaryUrl,
   WHISPER_RELEASE,
@@ -365,6 +367,25 @@ describe('whisperBinaryAsset', () => {
     assert.equal(
       whisperBinaryUrl(WHISPER_RELEASE, 'whisper-bin-ubuntu-x64.tar.gz'),
       `https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_RELEASE}/whisper-bin-ubuntu-x64.tar.gz`,
+    );
+  });
+});
+
+describe('ffmpegAsset', () => {
+  it('offers a static build for Linux and Windows x64', () => {
+    assert.equal(ffmpegAsset('linux', 'x64')?.asset, 'ffmpeg-master-latest-linux64-gpl.tar.xz');
+    assert.equal(ffmpegAsset('linux', 'arm64')?.asset, 'ffmpeg-master-latest-linuxarm64-gpl.tar.xz');
+    assert.equal(ffmpegAsset('win32', 'x64')?.asset, 'ffmpeg-master-latest-win64-gpl.zip');
+  });
+
+  it('has none for macOS — brew, or an ffmpeg already on PATH', () => {
+    assert.equal(ffmpegAsset('darwin', 'arm64'), undefined);
+  });
+
+  it('builds a download url from the stable latest tag', () => {
+    assert.equal(
+      ffmpegUrl('ffmpeg-master-latest-linux64-gpl.tar.xz'),
+      'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz',
     );
   });
 });

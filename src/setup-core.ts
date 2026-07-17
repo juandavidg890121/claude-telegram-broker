@@ -288,6 +288,26 @@ export function whisperBinaryAsset(platform: NodeJS.Platform, arch: string): Whi
 export const whisperBinaryUrl = (tag: string, asset: string): string =>
   `https://github.com/ggml-org/whisper.cpp/releases/download/${tag}/${asset}`;
 
+/**
+ * A static ffmpeg, for the case where it isn't already on PATH. BtbN publishes
+ * self-contained builds for Linux and Windows under a stable `latest` tag with
+ * stable asset names, so no API call is needed. macOS isn't built there; it
+ * falls back to a brew hint (and usually has ffmpeg already).
+ *
+ * The archives are large (~120 MB) because they're the full ffmpeg — the broker
+ * only needs the one binary, which the installer lifts out and drops next to
+ * whisper-cli, where audioStatus looks.
+ */
+export function ffmpegAsset(platform: NodeJS.Platform, arch: string): { asset: string } | undefined {
+  if (platform === 'linux' && arch === 'x64') return { asset: 'ffmpeg-master-latest-linux64-gpl.tar.xz' };
+  if (platform === 'linux' && arch === 'arm64') return { asset: 'ffmpeg-master-latest-linuxarm64-gpl.tar.xz' };
+  if (platform === 'win32' && arch === 'x64') return { asset: 'ffmpeg-master-latest-win64-gpl.zip' };
+  return undefined;
+}
+
+export const ffmpegUrl = (asset: string): string =>
+  `https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${asset}`;
+
 /** Where the README says the models live — HuggingFace, the resolve (raw) path. */
 export const modelUrl = (name: string): string =>
   `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${modelFilename(name)}`;

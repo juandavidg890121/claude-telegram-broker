@@ -49,10 +49,12 @@ re-asks, giving up after three tries rather than writing a broken config.
 
 If you opt into voice notes, it downloads a whisper model into a directory you
 choose and, on Linux and Windows, also downloads the prebuilt `whisper-cli`
-binary (with its libraries) into the same directory — so the folder ends up with
-everything the broker needs. `ffmpeg` it looks for on your `PATH` (most systems
-have it) and only asks you to install if it's genuinely missing. On macOS there's
-no prebuilt CLI, so it points you at `brew install whisper-cpp` instead.
+binary (with its libraries) into the same directory. `ffmpeg` it first looks for
+on your `PATH` (most systems have it); only if it's genuinely missing does it
+offer to download a static build into that directory too — so the folder ends up
+with everything the broker needs and nothing has to be installed system-wide. On
+macOS there are no prebuilt binaries, so it points you at
+`brew install whisper-cpp` / `brew install ffmpeg` instead.
 
 At the end you choose where the config goes: a **`.env` file** (written `0600`,
 the broker reads it automatically) or **shell `export` commands** it prints for

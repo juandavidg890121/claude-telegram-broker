@@ -22,7 +22,9 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   renameSync,
@@ -58,6 +60,8 @@ import {
   validatePermissionMode,
   validateToken,
   validateUserId,
+  ffmpegAsset,
+  ffmpegUrl,
   whisperBinaryAsset,
   whisperBinaryUrl,
   WHISPER_MODELS,
@@ -261,6 +265,39 @@ async function installWhisperBinary(dir: string): Promise<boolean> {
   return true;
 }
 
+/**
+ * Download a static ffmpeg for this platform, if one exists, and drop just the
+ * binary into `dir` — where audioStatus looks, alongside whisper-cli. Returns
+ * whether it installed one.
+ *
+ * The archive holds far more than the one binary the broker needs, so it's
+ * unpacked to a scratch dir and only ffmpeg is kept. macOS has no BtbN build and
+ * returns false, leaving the caller to point at brew.
+ */
+async function installFfmpeg(dir: string): Promise<boolean> {
+  const target = ffmpegAsset(process.platform, process.arch);
+  if (!target) return false;
+
+  const name = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+  const archive = join(dir, `.ffmpeg-${target.asset}`);
+  say(`    Downloading ffmpeg (${target.asset}, ~120 MB)…`);
+  await streamDownload(ffmpegUrl(target.asset), archive, 120_000_000);
+
+  const scratch = mkdtempSync(join(dir, '.ffmpeg-unpack-'));
+  try {
+    // tar auto-detects xz (.tar.xz) and, via bsdtar on Windows 10+, zip.
+    execFileSync('tar', ['-xf', archive, '-C', scratch], { stdio: 'ignore' });
+    // The build unpacks to a single top folder with the binary at bin/<name>.
+    const top = readdirSync(scratch)[0];
+    copyFileSync(join(scratch, top, 'bin', name), join(dir, name));
+    if (process.platform !== 'win32') chmodSync(join(dir, name), 0o755);
+  } finally {
+    rmSync(archive, { force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+  return true;
+}
+
 /** The latest whisper.cpp release tag, or the pinned fallback if GitHub is
  *  unreachable — the asset names are stable, so only the tag can drift. */
 async function latestWhisperTag(): Promise<string> {
@@ -304,7 +341,7 @@ async function setUpAudio(answers: SetupAnswers): Promise<void> {
 
   // The binary. Prefer downloading the prebuilt one where it exists; only guide
   // a build where it doesn't (macOS) or if the download failed.
-  if (audioStatus(dir).state !== 'ready' && whisperBinaryAsset(process.platform, process.arch)) {
+  if (missingPiece(dir, 'binary') && whisperBinaryAsset(process.platform, process.arch)) {
     if (await yes('    Download the whisper-cli binary too?', true)) {
       try {
         await installWhisperBinary(dir);
@@ -315,11 +352,31 @@ async function setUpAudio(answers: SetupAnswers): Promise<void> {
     }
   }
 
+  // ffmpeg — only if it's genuinely missing (audioStatus already accepts one on
+  // PATH), and only where a static build exists to fetch.
+  if (missingPiece(dir, 'ffmpeg') && ffmpegAsset(process.platform, process.arch)) {
+    if (await yes('    ffmpeg isn\'t on your PATH — download a static build (~120 MB)?', true)) {
+      try {
+        await installFfmpeg(dir);
+        say(`    ${dim('✓')} ffmpeg installed`);
+      } catch (error) {
+        say(`    ⚠️  couldn't install ffmpeg: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
   answers.whisperLanguage = await optional('    Spoken language (two-letter code) or Enter to auto-detect', validateLanguage, 'auto').then(
     (lang) => (lang && lang !== 'auto' ? lang : undefined),
   );
 
   reportAudioReadiness(dir);
+}
+
+/** Whether audioStatus still reports a given piece missing from `dir`. One
+ *  source of truth — the broker's own check — for what setup should offer next. */
+function missingPiece(dir: string, piece: 'binary' | 'ffmpeg'): boolean {
+  const status = audioStatus(dir);
+  return status.state === 'incomplete' && status.missing.some((m) => m.includes(piece));
 }
 
 /** Say what's ready and what still needs a hand, reusing the broker's own check. */
@@ -637,7 +694,7 @@ type ApplyPlan = {
   output?: 'env' | 'export';
   shell?: Shell;
   installHooks?: boolean;
-  whisper?: { model?: string; dir: string; language?: string; installBinary?: boolean };
+  whisper?: { model?: string; dir: string; language?: string; installBinary?: boolean; installFfmpeg?: boolean };
 };
 
 /**
@@ -679,11 +736,19 @@ async function runApply(file: string): Promise<void> {
       await downloadModel(modelUrl(model.name), dest, model.sizeMB * 1_000_000);
     }
     // installBinary defaults on: a plan that asks for whisper wants it usable.
-    if (plan.whisper.installBinary !== false && audioStatus(dir).state !== 'ready') {
+    if (plan.whisper.installBinary !== false && missingPiece(dir, 'binary')) {
       try {
         await installWhisperBinary(dir);
       } catch (error) {
         say(`⚠️  model downloaded, but the binary didn't: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    // ffmpeg the same way — only when it's actually missing (not on PATH).
+    if (plan.whisper.installFfmpeg !== false && missingPiece(dir, 'ffmpeg') && ffmpegAsset(process.platform, process.arch)) {
+      try {
+        await installFfmpeg(dir);
+      } catch (error) {
+        say(`⚠️  couldn't install ffmpeg: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
     reportAudioReadiness(dir);
