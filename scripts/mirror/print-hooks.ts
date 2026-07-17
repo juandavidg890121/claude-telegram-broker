@@ -17,7 +17,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const tsx = tsxPath(root);
 const env = join(root, '.env');
 
-console.log('Prefer `pnpm setup`, which merges this for you. To do it by hand,');
+console.log('Prefer `pnpm configure`, which merges this for you. To do it by hand,');
 console.log('merge this into the "hooks" object of ~/.claude/settings.json:\n');
 console.log(JSON.stringify({ hooks: buildHookConfig(root) }, null, 2));
 

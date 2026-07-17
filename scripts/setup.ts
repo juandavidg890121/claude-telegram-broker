@@ -2,7 +2,7 @@
  * Interactive first-run setup: ask for what the broker needs, discover what it
  * can, and write .env and the /watch hooks so nobody has to know the layout.
  *
- *   pnpm setup
+ *   pnpm configure
  *
  * The manual half — creating the bot, turning privacy mode off, making the
  * forum group — happens inside Telegram and no script can do it, so this walks
@@ -34,6 +34,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { Readable } from 'node:stream';
+import { ReadStream, WriteStream } from 'node:tty';
 import { fileURLToPath } from 'node:url';
 import { stdin, stdout } from 'node:process';
 import { execFileSync } from 'node:child_process';
@@ -68,8 +69,31 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const envPath = join(root, '.env');
 const settingsPath = join(homedir(), '.claude', 'settings.json');
 
-const rl = createInterface({ input: stdin, output: stdout });
-const say = (line = ''): void => console.log(line);
+/**
+ * Talk to the user's real terminal, even when our own stdin is a pipe.
+ *
+ * Run directly, stdin is a TTY and we use it. Launched by something else — the
+ * /telegram-broker:setup skill runs us through Claude, whose stdin is not a
+ * terminal — we open /dev/tty instead, the same trick ssh and sudo use to prompt
+ * a human when their stdin is busy. Without this the prompts would go nowhere
+ * and the first read would hit EOF. No /dev/tty (Windows, or truly headless)
+ * means we fall back and the caller must run us in a real terminal.
+ */
+function openTerminal(): { input: NodeJS.ReadStream; output: NodeJS.WriteStream } {
+  if (stdin.isTTY) return { input: stdin, output: stdout };
+  if (process.platform !== 'win32') {
+    try {
+      return { input: new ReadStream(openSync('/dev/tty', 'r')), output: new WriteStream(openSync('/dev/tty', 'w')) };
+    } catch {
+      // No controlling terminal — fall through to the pipes we were given.
+    }
+  }
+  return { input: stdin, output: stdout };
+}
+
+const term = openTerminal();
+const rl = createInterface({ input: term.input, output: term.output });
+const say = (line = ''): void => void term.output.write(line + '\n');
 const bold = (s: string): string => `\x1b[1m${s}\x1b[0m`;
 const dim = (s: string): string => `\x1b[2m${s}\x1b[0m`;
 
@@ -164,12 +188,12 @@ async function downloadModel(url: string, dest: string, expectedBytes: number): 
       seen += (chunk as Buffer).length;
       if (seen - lastShown > 2_000_000 || seen === total) {
         const pct = total ? ` (${Math.round((seen / total) * 100)}%)` : '';
-        stdout.write(`\r    ↓ ${formatSize(seen)}${pct}   `);
+        term.output.write(`\r    ↓ ${formatSize(seen)}${pct}   `);
         lastShown = seen;
       }
     }
     await new Promise<void>((resolve, reject) => file.end((err?: Error | null) => (err ? reject(err) : resolve())));
-    stdout.write('\n');
+    term.output.write("\n");
 
     const head = Buffer.alloc(1);
     const fd = openSync(part, 'r');
@@ -270,21 +294,22 @@ async function yes(question: string, defaultYes = false): Promise<boolean> {
   return answer.startsWith('y') || answer === 's' || answer.startsWith('si');
 }
 
-/** Read a line without echoing it — for the token. */
+/** Read a line without echoing it — for the token. Readline echoes typed
+ *  characters by writing to its output, so muting that output hides them. */
 async function secret(question: string): Promise<string> {
-  stdout.write(question + ' ');
+  const output = term.output as unknown as { write: (c: string) => boolean };
+  output.write(question + ' ');
   const muted = { active: false };
-  const original = (stdout as unknown as { write: (c: string) => boolean }).write.bind(stdout);
-  (stdout as unknown as { write: (c: string) => boolean }).write = (chunk: string): boolean =>
-    muted.active ? true : original(chunk);
+  const original = output.write.bind(output);
+  output.write = (chunk: string): boolean => (muted.active ? true : original(chunk));
   muted.active = true;
   try {
     const value = await rl.question('');
     return value.trim();
   } finally {
     muted.active = false;
-    (stdout as unknown as { write: (c: string) => boolean }).write = original;
-    stdout.write('\n');
+    output.write = original;
+    original('\n');
   }
 }
 

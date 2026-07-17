@@ -33,11 +33,11 @@ every Telegram message already carries is the routing key, so there is no
 
 ## Setup
 
-### The quick way: `pnpm setup`
+### The quick way: `pnpm configure`
 
 ```bash
 pnpm install
-pnpm setup
+pnpm configure
 ```
 
 An interactive installer that does the whole configuration. It validates the
@@ -56,9 +56,12 @@ does the tedious model download and the wiring.
 At the end you choose where the config goes: a **`.env` file** (written `0600`,
 the broker reads it automatically) or **shell `export` commands** it prints for
 you to run — with the right syntax for your platform, whether that's `export` on
-Linux/macOS, `$env:` in PowerShell, or `set` in cmd. Run it in a real terminal —
-it reads the token hidden, so it never lands in scrollback. As a plugin,
-`/telegram-broker:setup` prints the one command to run.
+Linux/macOS, `$env:` in PowerShell, or `set` in cmd. It reads the token hidden,
+so it never lands in scrollback. As a plugin, `/telegram-broker:setup` builds it
+and launches it for you; the prompts appear in your terminal either way.
+
+> Run it as `pnpm configure`, not `pnpm setup` — `setup` is a built-in pnpm
+> command and would run instead of this one.
 
 It still can't do the parts that live inside Telegram — creating the bot,
 turning privacy mode off, making the group — so it walks you through those and
@@ -94,7 +97,7 @@ Get your numeric user id from [@userinfobot](https://t.me/userinfobot).
 
 5. **Only if you want `/watch`** (relaying into a session you have open in VS
    Code — `/new` and `/fork` need none of this): install three hooks, once, in
-   `~/.claude/settings.json`. `pnpm setup` offers to do this for you; the rest of
+   `~/.claude/settings.json`. `pnpm configure` offers to do this for you; the rest of
    this step is the by-hand version.
 
    Print the block with real paths already filled in, from the checkout:
