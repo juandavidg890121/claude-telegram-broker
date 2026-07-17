@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -30,8 +30,25 @@ export type AudioStatus =
 /** Newer whisper.cpp builds install `whisper-cli`; older ones called it `main`. */
 const WHISPER_BINARIES = ['whisper-cli', 'main', 'whisper'];
 
+/**
+ * Every name a binary may go by on this platform, in preference order.
+ *
+ * Windows executables need the .exe suffix: existsSync does no PATHEXT-style
+ * resolution the way a shell would, so an extensionless lookup silently never
+ * matches whisper-cli.exe or ffmpeg.exe even when they are right there. The
+ * bare name stays on as a fallback — MSYS and friends do ship extensionless
+ * binaries — but second, because where both exist the .exe is the one that will
+ * actually run.
+ */
+function candidates(names: readonly string[]): readonly string[] {
+  if (process.platform !== 'win32') return names;
+  return names.flatMap((name) => [`${name}.exe`, name]);
+}
+
 function findIn(dir: string, names: readonly string[]): string | undefined {
-  return names.map((name) => join(dir, name)).find((path) => existsSync(path));
+  return candidates(names)
+    .map((name) => join(dir, name))
+    .find((path) => existsSync(path));
 }
 
 function findModel(dir: string, configured?: string): string | undefined {
@@ -54,12 +71,14 @@ function findModel(dir: string, configured?: string): string | undefined {
 function findFfmpeg(dir: string): string | undefined {
   const local = findIn(dir, ['ffmpeg']);
   if (local) return local;
-  const fromPath = (process.env.PATH ?? '')
-    .split(':')
+  // path.delimiter, not ':' — PATH is separated by ';' on Windows, and splitting
+  // on ':' there shreds it at the drive letter instead, turning every entry into
+  // a path that cannot exist.
+  return (process.env.PATH ?? '')
+    .split(delimiter)
     .filter(Boolean)
-    .map((p) => join(p, 'ffmpeg'))
-    .find((p) => existsSync(p));
-  return fromPath;
+    .flatMap((entry) => candidates(['ffmpeg']).map((name) => join(entry, name)))
+    .find((path) => existsSync(path));
 }
 
 /**
