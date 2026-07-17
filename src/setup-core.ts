@@ -263,6 +263,31 @@ export const WHISPER_MODELS: readonly WhisperModel[] = [
 
 export const modelFilename = (name: string): string => `ggml-${name}.bin`;
 
+/**
+ * whisper.cpp ships prebuilt CLI binaries for some platforms, which beats
+ * asking a novice to install cmake and compile. The Linux and Windows archives
+ * carry whisper-cli next to its shared libs, and the binary's RUNPATH is
+ * `$ORIGIN`, so it finds them in its own directory — extracting the whole
+ * archive into the whisper dir just works. macOS has no such CLI asset (only an
+ * xcframework for building apps), so it still falls back to brew or a build.
+ *
+ * Used if the release ever moves; the asset names have been stable across
+ * releases, so only the tag changes.
+ */
+export const WHISPER_RELEASE = 'v1.9.1';
+
+export type WhisperAsset = { asset: string; archive: 'tar.gz' | 'zip' };
+
+export function whisperBinaryAsset(platform: NodeJS.Platform, arch: string): WhisperAsset | undefined {
+  if (platform === 'linux' && arch === 'x64') return { asset: 'whisper-bin-ubuntu-x64.tar.gz', archive: 'tar.gz' };
+  if (platform === 'linux' && arch === 'arm64') return { asset: 'whisper-bin-ubuntu-arm64.tar.gz', archive: 'tar.gz' };
+  if (platform === 'win32' && arch === 'x64') return { asset: 'whisper-bin-x64.zip', archive: 'zip' };
+  return undefined; // macOS, 32-bit Windows, anything else → build/brew
+}
+
+export const whisperBinaryUrl = (tag: string, asset: string): string =>
+  `https://github.com/ggml-org/whisper.cpp/releases/download/${tag}/${asset}`;
+
 /** Where the README says the models live — HuggingFace, the resolve (raw) path. */
 export const modelUrl = (name: string): string =>
   `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${modelFilename(name)}`;

@@ -58,7 +58,10 @@ import {
   validatePermissionMode,
   validateToken,
   validateUserId,
+  whisperBinaryAsset,
+  whisperBinaryUrl,
   WHISPER_MODELS,
+  WHISPER_RELEASE,
   type DiscoveredGroup,
   type DiscoveredUser,
   type SetupAnswers,
@@ -176,20 +179,15 @@ function writableDir(raw: string): string {
 }
 
 /**
- * Download a model to `dest`, streaming with a progress line, and refuse
- * anything that isn't plausibly a model.
- *
- * Downloads land in a `.part` file renamed only on success, so an interrupted
- * download can't be mistaken for a finished one. The size and first-bytes checks
- * are there because a 404 or a redirect to a login page comes back as HTML with
- * a 200, and saved as `ggml-base.bin` it would fail much later as "model unusable"
- * with nothing pointing at the actual cause.
+ * Stream `url` to `dest` with a progress line, into a `.part` file renamed only
+ * on success so an interrupted download can't be mistaken for a finished one.
+ * Returns the byte count for the caller to sanity-check.
  */
-async function downloadModel(url: string, dest: string, expectedBytes: number): Promise<void> {
+async function streamDownload(url: string, dest: string, sizeHint: number): Promise<number> {
   const response = await fetch(url);
   if (!response.ok || !response.body) throw new Error(`download failed: HTTP ${response.status}`);
 
-  const total = Number(response.headers.get('content-length')) || expectedBytes;
+  const total = Number(response.headers.get('content-length')) || sizeHint;
   const part = `${dest}.part`;
   const file = createWriteStream(part);
   let seen = 0;
@@ -206,21 +204,74 @@ async function downloadModel(url: string, dest: string, expectedBytes: number): 
       }
     }
     await new Promise<void>((resolve, reject) => file.end((err?: Error | null) => (err ? reject(err) : resolve())));
-    term.output.write("\n");
-
-    const head = Buffer.alloc(1);
-    const fd = openSync(part, 'r');
-    try {
-      readSync(fd, head, 0, 1, 0);
-    } finally {
-      closeSync(fd);
-    }
-    assertPlausibleModel(head[0], seen, expectedBytes);
+    term.output.write('\n');
     renameSync(part, dest);
+    return seen;
   } catch (error) {
     file.destroy();
     rmSync(part, { force: true });
     throw error;
+  }
+}
+
+/** Download a model, then refuse anything that isn't plausibly one — a 404 or a
+ *  redirect to a web page arrives as HTML with a 200 and would fail much later. */
+async function downloadModel(url: string, dest: string, expectedBytes: number): Promise<void> {
+  const seen = await streamDownload(url, dest, expectedBytes);
+  const head = Buffer.alloc(1);
+  const fd = openSync(dest, 'r');
+  try {
+    readSync(fd, head, 0, 1, 0);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    assertPlausibleModel(head[0], seen, expectedBytes);
+  } catch (error) {
+    rmSync(dest, { force: true }); // don't leave a bad model that reads as present
+    throw error;
+  }
+}
+
+/**
+ * Download and unpack the prebuilt whisper.cpp binary for this platform, if one
+ * exists, into `dir`. Returns whether it installed one.
+ *
+ * The whole archive is extracted, not just whisper-cli: it's a shared build, and
+ * the binary's RUNPATH is `$ORIGIN`, so the .so/.dll siblings must sit next to
+ * it — which is exactly where audioStatus and the broker then find it. macOS and
+ * odd arches have no such asset and return false, leaving the caller to guide a
+ * build.
+ */
+async function installWhisperBinary(dir: string): Promise<boolean> {
+  const target = whisperBinaryAsset(process.platform, process.arch);
+  if (!target) return false;
+
+  const tag = await latestWhisperTag();
+  const archive = join(dir, `.whisper-${target.asset}`);
+  say(`    Downloading whisper-cli (${tag}, ${target.asset})…`);
+  await streamDownload(whisperBinaryUrl(tag, target.asset), archive, 10_000_000);
+  try {
+    // tar handles both .tar.gz (GNU tar) and .zip (bsdtar, shipped on Windows 10+).
+    // --strip-components=1 drops the archive's top-level folder.
+    execFileSync('tar', ['-xf', archive, '-C', dir, '--strip-components=1'], { stdio: 'ignore' });
+  } finally {
+    rmSync(archive, { force: true });
+  }
+  return true;
+}
+
+/** The latest whisper.cpp release tag, or the pinned fallback if GitHub is
+ *  unreachable — the asset names are stable, so only the tag can drift. */
+async function latestWhisperTag(): Promise<string> {
+  try {
+    const response = await fetch('https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest', {
+      headers: { 'user-agent': 'telegram-broker-setup' },
+    });
+    const body = (await response.json()) as { tag_name?: string };
+    return body.tag_name ?? WHISPER_RELEASE;
+  } catch {
+    return WHISPER_RELEASE;
   }
 }
 
@@ -251,6 +302,19 @@ async function setUpAudio(answers: SetupAnswers): Promise<void> {
     say(`    ${dim('✓')} model saved to ${dest}`);
   }
 
+  // The binary. Prefer downloading the prebuilt one where it exists; only guide
+  // a build where it doesn't (macOS) or if the download failed.
+  if (audioStatus(dir).state !== 'ready' && whisperBinaryAsset(process.platform, process.arch)) {
+    if (await yes('    Download the whisper-cli binary too?', true)) {
+      try {
+        await installWhisperBinary(dir);
+        say(`    ${dim('✓')} whisper-cli installed`);
+      } catch (error) {
+        say(`    ⚠️  couldn't install the binary: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
   answers.whisperLanguage = await optional('    Spoken language (two-letter code) or Enter to auto-detect', validateLanguage, 'auto').then(
     (lang) => (lang && lang !== 'auto' ? lang : undefined),
   );
@@ -270,25 +334,28 @@ function reportAudioReadiness(dir: string): void {
   const win = process.platform === 'win32';
   for (const missing of status.missing) {
     if (missing.includes('binary')) {
-      // audioStatus already looks for whisper-cli.exe on Windows, so the copy
-      // target and command below match what it will actually find.
       const binary = win ? 'whisper-cli.exe' : 'whisper-cli';
       say(`    ${dim('!')} whisper.cpp binary (${binary}) not found in ${dir}.`);
-      if (process.platform === 'darwin' && onPath('brew')) {
+      if (whisperBinaryAsset(process.platform, process.arch)) {
+        // A prebuilt exists for this platform — re-run and accept the download.
+        say('      Re-run setup and accept "Download the whisper-cli binary" to get it.');
+      } else if (process.platform === 'darwin' && onPath('brew')) {
         say('      Install it with: ' + bold('brew install whisper-cpp') + `, then copy ${binary} here.`);
       } else {
         say('      Build it (needs cmake + a C++ compiler), see the README "Voice notes" section:');
         say(dim('        git clone --depth 1 https://github.com/ggml-org/whisper.cpp && cd whisper.cpp'));
         say(dim('        cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF'));
         say(dim('        cmake --build build -j --config Release'));
-        say(dim(win ? `        copy build\\bin\\Release\\${binary} "${dir}"` : `        cp build/bin/${binary} "${dir}/"`));
+        say(dim(`        cp build/bin/${binary} "${dir}/"`));
       }
     } else if (missing.includes('ffmpeg')) {
-      const how = win ? 'winget install ffmpeg' : process.platform === 'darwin' ? 'brew install ffmpeg' : 'apt install ffmpeg';
-      say(`    ${dim('!')} ffmpeg not found — install it: ${bold(how)}`);
+      // ffmpeg on PATH already satisfies audioStatus, so this only prints when
+      // it's genuinely absent everywhere.
+      const how = win ? 'winget install ffmpeg' : process.platform === 'darwin' ? 'brew install ffmpeg' : 'sudo apt install ffmpeg';
+      say(`    ${dim('!')} ffmpeg not found in ${dir} or on PATH — install it: ${bold(how)}`);
     }
   }
-  say(dim('    Voice notes turn on automatically once the binary is in place; nothing else to configure.'));
+  say(dim('    Voice notes turn on automatically once everything is in place.'));
 }
 
 /** Is a command on PATH? Used only to tailor a hint, so a false "no" is harmless. */
@@ -570,7 +637,7 @@ type ApplyPlan = {
   output?: 'env' | 'export';
   shell?: Shell;
   installHooks?: boolean;
-  whisper?: { model?: string; dir: string; language?: string };
+  whisper?: { model?: string; dir: string; language?: string; installBinary?: boolean };
 };
 
 /**
@@ -610,6 +677,14 @@ async function runApply(file: string): Promise<void> {
     if (!existsSync(dest) || statSync(dest).size < model.sizeMB * 700_000) {
       say(`Downloading ${modelFilename(model.name)} (~${model.sizeMB} MB)…`);
       await downloadModel(modelUrl(model.name), dest, model.sizeMB * 1_000_000);
+    }
+    // installBinary defaults on: a plan that asks for whisper wants it usable.
+    if (plan.whisper.installBinary !== false && audioStatus(dir).state !== 'ready') {
+      try {
+        await installWhisperBinary(dir);
+      } catch (error) {
+        say(`⚠️  model downloaded, but the binary didn't: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     reportAudioReadiness(dir);
   }

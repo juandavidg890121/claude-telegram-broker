@@ -31,6 +31,9 @@ import {
   stripSurroundingQuotes,
   validateToken,
   validateUserId,
+  whisperBinaryAsset,
+  whisperBinaryUrl,
+  WHISPER_RELEASE,
 } from '../src/setup-core.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -341,6 +344,28 @@ describe('whisper model catalog', () => {
   it('builds the HuggingFace resolve url', () => {
     assert.equal(modelUrl('base'), 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin');
     assert.equal(modelFilename('large-v3-turbo'), 'ggml-large-v3-turbo.bin');
+  });
+});
+
+describe('whisperBinaryAsset', () => {
+  it('offers a prebuilt for Linux and Windows x64', () => {
+    assert.deepEqual(whisperBinaryAsset('linux', 'x64'), { asset: 'whisper-bin-ubuntu-x64.tar.gz', archive: 'tar.gz' });
+    assert.deepEqual(whisperBinaryAsset('linux', 'arm64'), { asset: 'whisper-bin-ubuntu-arm64.tar.gz', archive: 'tar.gz' });
+    assert.deepEqual(whisperBinaryAsset('win32', 'x64'), { asset: 'whisper-bin-x64.zip', archive: 'zip' });
+  });
+
+  it('has none for macOS or odd arches — those build or brew', () => {
+    // whisper.cpp ships only an xcframework for mac, not a drop-in CLI.
+    assert.equal(whisperBinaryAsset('darwin', 'arm64'), undefined);
+    assert.equal(whisperBinaryAsset('darwin', 'x64'), undefined);
+    assert.equal(whisperBinaryAsset('win32', 'ia32'), undefined);
+  });
+
+  it('builds a release download url', () => {
+    assert.equal(
+      whisperBinaryUrl(WHISPER_RELEASE, 'whisper-bin-ubuntu-x64.tar.gz'),
+      `https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_RELEASE}/whisper-bin-ubuntu-x64.tar.gz`,
+    );
   });
 });
 

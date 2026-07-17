@@ -50,7 +50,9 @@ answer is caught now.
 5. **Permission mode** (optional): one of `default`, `acceptEdits`, `plan`,
    `dontAsk`, `bypassPermissions`. **Voice notes** (optional): if yes, ask which
    whisper model (`base` 148 MB, `small`, `large-v3-turbo`, `large-v3`) and which
-   directory to install into — apply will download it.
+   directory to install into — apply downloads the model *and*, on Linux/Windows,
+   the prebuilt `whisper-cli` binary into that directory. (macOS has no prebuilt;
+   it'll report that `whisper-cli` still needs `brew install whisper-cpp`.)
 
 6. **Where the config goes:** a `.env` file (default) or printed shell `export`
    commands (`output: "export"`, with `shell` = `posix`/`powershell`/`cmd`).
