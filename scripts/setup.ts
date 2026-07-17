@@ -428,16 +428,26 @@ async function main(): Promise<void> {
     say('');
   }
 
-  // 4. Optional --------------------------------------------------------------
+  // 4. Defaults — always asked, Enter accepts the shown default ---------------
   const answers: SetupAnswers = { token, allowedUsers: allowed, groupId };
-  if (await yes(bold('  4. Configure advanced options') + ' (model, permissions, voice notes)?', false)) {
-    const cwd = await optional('\n  Default working directory for /new', existingDir, homedir());
-    if (cwd && cwd !== homedir()) answers.defaultCwd = cwd;
+  say(bold('  4. Defaults') + dim(' — press Enter to accept each'));
 
-    answers.model = await optional('  Model for new sessions, or Enter for the default:', validateModelId);
+  // Home is the default cwd the broker itself falls back to, so writing it would
+  // just pin today's value; only a different directory is worth recording.
+  const cwd = await optional('    Working directory /new starts sessions in', existingDir, homedir());
+  if (cwd && cwd !== homedir()) answers.defaultCwd = cwd;
+  say(dim(`      → ${answers.defaultCwd ?? `${homedir()} (the broker's default)`}`));
 
+  // No default written: an empty BROKER_MODEL lets Claude Code pick, and pinning
+  // a specific id here would silently freeze you to today's model.
+  answers.model = await optional("    Model for new sessions, or Enter for Claude Code's default", validateModelId);
+  say(dim(`      → ${answers.model ?? "Claude Code's default"}`));
+  say('');
+
+  // 5. Optional extras --------------------------------------------------------
+  if (await yes(bold('  5. Configure extras') + ' (permission mode, voice notes)?', false)) {
     answers.permissionMode = await optional(
-      '  Permission mode (default / acceptEdits / plan / bypassPermissions)',
+      '    Permission mode (default / acceptEdits / plan / dontAsk / bypassPermissions)',
       (raw) => {
         const mode = validatePermissionMode(raw);
         return mode === 'default' ? undefined : mode; // default is the default; no need to write it
@@ -445,14 +455,14 @@ async function main(): Promise<void> {
       'default',
     );
 
-    if (await yes('  Enable voice notes (needs a local whisper.cpp)?', false)) {
+    if (await yes('    Enable voice notes (needs a local whisper.cpp)?', false)) {
       await setUpAudio(answers);
     }
     say('');
   }
 
-  // 5. .env or exports -------------------------------------------------------
-  say(bold('  Where should the configuration go?'));
+  // 6. .env or exports -------------------------------------------------------
+  say(bold('  6. Where should the configuration go?'));
   say('  1) a .env file next to the broker ' + dim('(recommended — the broker reads it automatically)'));
   say('  2) export commands you run in your shell ' + dim('(nothing is written to disk)'));
   const wroteEnv = (await ask('  Choose 1 or 2', '1')) !== '2';
@@ -464,7 +474,7 @@ async function main(): Promise<void> {
     printExports(answers);
   }
 
-  // 6. Hooks -----------------------------------------------------------------
+  // 7. Hooks -----------------------------------------------------------------
   if (!existsSync(tsxPath(root))) {
     say(`\n  ${dim('!')} node_modules missing — run ${bold('pnpm install')} before starting the broker.`);
   }
