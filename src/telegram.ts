@@ -310,11 +310,9 @@ export class TelegramFrontend implements Frontend {
       }
 
       console.log(`[telegram] audio from ${userId} -> "${text.slice(0, 60)}"`);
-      // Echo it back: transcription is a guess, and acting on a misheard
-      // instruction without ever showing what was heard is how you find out
-      // afterwards.
-      await this.sendText(conversationId, `🎙️ ${text}`);
-
+      // No echo-back: send straight through, exactly like a typed message —
+      // a voice note shouldn't cost two round trips (the transcript, then the
+      // reply) when a typed message only costs one.
       msg.text = text;
       await this.messageHandler?.(msg);
     } catch (error) {
