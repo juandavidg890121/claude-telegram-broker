@@ -39,8 +39,26 @@ export const PERMISSION_MODES: PermissionMode[] = [
 
 export class SessionManager {
   private live = new Map<string, Live>();
+  /** Conversations with a turn in flight — pushed, not yet finished. */
+  private working = new Set<string>();
 
   constructor(private readonly deps: SessionDeps) {}
+
+  /**
+   * Is Claude still working on the last thing sent here?
+   *
+   * Only meaningful for broker-owned sessions. A *watched* session runs in
+   * someone's VS Code and this process never sees its turns, so this answers
+   * false for those — the caller must not read that as "idle".
+   *
+   * Exists for /loop, which is the one caller that can sensibly skip: a person
+   * typing a second message mid-turn means it, and it queues. A timer firing
+   * again because the last answer is still being written means nothing, and
+   * queueing it builds a backlog that never drains.
+   */
+  isWorking(conversationId: string): boolean {
+    return this.working.has(conversationId);
+  }
 
   /** Per-session overrides survive a restart, so they apply on resume too. */
   async setPermissionMode(conversationId: string, mode: PermissionMode): Promise<void> {
@@ -61,6 +79,10 @@ export class SessionManager {
 
   async send(conversationId: string, text: string): Promise<void> {
     const session = this.live.get(conversationId) ?? (await this.spawn(conversationId));
+    // Marked before the push, not after: the queue can hand the message
+    // straight to a waiting consumer, so `result` may land before a later line
+    // here would have set this — and the flag would then be stuck on forever.
+    this.working.add(conversationId);
     session.input.push({
       type: 'user',
       message: { role: 'user', content: text },
@@ -154,14 +176,22 @@ export class SessionManager {
           continue;
         }
 
-        if (message.type === 'result' && message.subtype !== 'success') {
-          await this.deps.emit(conversationId, `⚠️ Session ended: ${message.subtype}`);
+        if (message.type === 'result') {
+          // The turn boundary, success or not: `result` is the last message of
+          // every turn, which is what makes it the one place this can clear.
+          this.working.delete(conversationId);
+          if (message.subtype !== 'success') {
+            await this.deps.emit(conversationId, `⚠️ Session ended: ${message.subtype}`);
+          }
         }
       }
     } catch (error) {
       await this.deps.emit(conversationId, `⚠️ Session error: ${String(error)}`);
     } finally {
       this.live.delete(conversationId);
+      // A session that died mid-turn never sends `result`. Leaving the flag set
+      // would make every future /loop fire skip itself, forever, silently.
+      this.working.delete(conversationId);
     }
   }
 }
