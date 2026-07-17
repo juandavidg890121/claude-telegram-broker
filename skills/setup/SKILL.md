@@ -1,71 +1,97 @@
 ---
-description: Configure the Telegram broker for the first time — build the plugin and launch its interactive installer so the user completes setup in their own terminal.
+description: Configure the Telegram broker for the first time — conduct the setup interview in the conversation, then apply it non-interactively so it works even in editors where the installer can't reach a terminal.
 disable-model-invocation: true
 ---
 
 # Set up the Telegram broker
 
-There is an interactive installer (`scripts/setup.ts`, the `configure` script)
-that does the whole configuration: it validates the bot token against Telegram,
-discovers the user's id and group id by watching for a message they send,
-optionally downloads a whisper model for voice notes, writes the config, and
-merges the `/watch` hooks into `~/.claude/settings.json` with a backup.
+The installer (`scripts/setup.ts`) has two modes. Run it directly and it's
+interactive. Launched by you in most editor environments there is no terminal it
+can prompt through, so you drive it a different way: **collect the answers in
+this conversation, write them to a plan file, and apply them non-interactively**.
 
-It reads from the terminal directly (via `/dev/tty` when its stdin isn't one),
-so it can prompt the user even when you launch it. Do this:
+Before starting, say this once, plainly: the bot token will pass through this
+conversation, because you need it to apply the config. That is the trade for
+doing setup here instead of in a terminal. If the user would rather keep the
+token out of the chat entirely, they run `pnpm configure` themselves in a
+terminal and you stop here.
 
-## 1. Build, then launch it
-
-Run these from the plugin root (`${CLAUDE_PLUGIN_ROOT}`), the second one in the
-**foreground with a long timeout** — the user will be answering prompts in their
-terminal while it runs:
+## 1. Build
 
 ```bash
 cd "${CLAUDE_PLUGIN_ROOT}" && pnpm install
 ```
 
+## 2. Interview — one thing at a time, in the chat
+
+Ask for each of these. Validate as you go using plain HTTP (`curl`), so a wrong
+answer is caught now.
+
+1. **Bot token.** From [@BotFather](https://t.me/BotFather): `/newbot`, then
+   `/setprivacy` → the bot → **Disable**. Validate it:
+   `curl -s "https://api.telegram.org/bot<TOKEN>/getMe"` — `"ok":true` and a
+   `"username"` means it's good; show the username. Re-ask on failure.
+
+2. **Their Telegram user id.** Ask them to send the bot any message, then read it
+   off `curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates"` — the `from.id`
+   of a `private` chat message. Confirm it back. (Ask for extra allowed ids if
+   they want any; everyone allowed can approve tool calls, i.e. run commands on
+   this machine.)
+
+3. **Group id (optional).** For one-topic-per-session: they make a forum group
+   (Topics on), add the bot as admin with *Manage Topics*, post a message; read
+   the `chat.id` (a `group`/`supergroup`, starts with `-100`) from `getUpdates`.
+   Skipping it runs the broker in a single chat.
+
+4. **Working directory** `/new` starts sessions in — default is their home.
+   **Model** for new sessions — default is Claude Code's own. Enter/skip accepts
+   the default for each; only record a value they actually chose.
+
+5. **Permission mode** (optional): one of `default`, `acceptEdits`, `plan`,
+   `dontAsk`, `bypassPermissions`. **Voice notes** (optional): if yes, ask which
+   whisper model (`base` 148 MB, `small`, `large-v3-turbo`, `large-v3`) and which
+   directory to install into — apply will download it.
+
+6. **Where the config goes:** a `.env` file (default) or printed shell `export`
+   commands (`output: "export"`, with `shell` = `posix`/`powershell`/`cmd`).
+
+## 3. Apply
+
+Write the answers to a plan file and hand it to the installer. It validates every
+field again, does the writing/downloading/hook-merge, and **deletes the plan file
+itself** (it holds the token):
+
 ```bash
-cd "${CLAUDE_PLUGIN_ROOT}" && pnpm configure
+cat > /tmp/broker-plan.json <<'JSON'
+{
+  "token": "…",
+  "allowedUsers": ["123456789"],
+  "groupId": "-1001234567890",
+  "defaultCwd": null,
+  "model": null,
+  "permissionMode": null,
+  "whisper": null,
+  "output": "env",
+  "installHooks": true
+}
+JSON
+cd "${CLAUDE_PLUGIN_ROOT}" && pnpm configure --apply /tmp/broker-plan.json
 ```
 
-- Use `pnpm configure`, **never** `pnpm setup` — `setup` is a built-in pnpm
-  command (it edits the user's shell profile) and would run instead of ours.
-- If `pnpm` is missing: `npm install` then `npx tsx scripts/setup.ts`.
-- The installer talks to the user's real terminal, so its prompts appear there,
-  not in your output. Wait for it to exit; don't try to answer for it.
+Omit or `null` the optional fields the user didn't set. For voice notes, set
+`"whisper": { "model": "base", "dir": "/path/they/chose", "language": "auto" }`.
 
-**If the prompts don't show up in the user's terminal** (some environments keep
-the terminal attached to the agent), tell them to run it themselves — the build
-is already done:
+If apply reports a validation error, fix that one answer with the user and re-run
+— don't rewrite the others.
 
-```bash
-cd "${CLAUDE_PLUGIN_ROOT}" && pnpm configure
-```
+## 4. After
 
-## 2. Tell them what it will ask for
+Don't read the token back out of `.env`, and don't echo it. When it's done,
+`/telegram-broker:start` launches the daemon.
 
-So nothing mid-run is a surprise:
+## The manual alternative
 
-- **A bot token** from [@BotFather](https://t.me/BotFather) — `/newbot`, then
-  `/setprivacy` → the bot → **Disable** so it can read group messages.
-- **A DM to the bot** so it can learn their user id automatically.
-- **Optionally a forum group** (Topics enabled, bot added as admin with *Manage
-  Topics*) for the one-topic-per-session workflow. Skipping it runs the broker
-  in a single chat instead.
-- **Optionally voice notes**: it downloads a whisper model (148 MB and up) into a
-  directory they choose and reports whether `whisper.cpp` and `ffmpeg` are
-  present.
-- At the end, whether to write a `.env` file or print shell `export` commands.
-
-Required fields can't be skipped: pressing Enter past one three times stops
-setup rather than writing a broken config.
-
-## 3. Don't handle the token yourself
-
-The bot token grants control of the bot; the allowlist grants running commands
-on this machine. The installer reads the token hidden and keeps it out of both
-the terminal scrollback and this conversation — that is the whole reason it
-prompts in the terminal rather than through you. Do not ask the user to paste
-the token to you, and do not read it from `.env` afterwards.
-
-When it finishes, `/telegram-broker:start` launches the daemon.
+If the user prefers, everything above is a single interactive command they run in
+their own terminal — `cd "${CLAUDE_PLUGIN_ROOT}" && pnpm configure` — which keeps
+the token off the chat entirely. (Note: `pnpm configure`, not `pnpm setup` —
+`setup` is a built-in pnpm command.)
