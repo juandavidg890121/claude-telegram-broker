@@ -377,10 +377,19 @@ BROKER_WHISPER_DIR=/opt/whisper        # contains whisper-cli + ggml-large-v3.bi
 BROKER_WHISPER_LANGUAGE=es             # optional; 'auto' detects per message
 ```
 
-Send a voice note and the transcript is echoed back to the topic (`🎙️ …`) before
-it's acted on — transcription is a guess, and acting on a misheard instruction
-without ever showing what was heard is how you find out afterwards. The audio
-file is deleted as soon as it's transcribed; the text is the artefact.
+Send a voice note and the transcript comes back quoted (`🎙️ Heard:`), as a reply
+to the note itself, before it's acted on — transcription is a guess, and acting
+on a misheard instruction without ever showing what was heard is how you find out
+afterwards. Read it, and `/interrupt` if that isn't what you said.
+
+It's quoted rather than plain so you can tell your words from Claude's: both
+arrive from the same bot, in the same topic, and a 🎙️ was the only thing telling
+them apart. It replies to the voice note so two notes sent in a row can't be
+mistaken for one another. And if the echo can't be delivered at all, the note is
+refused rather than acted on — being shown the transcript is the point, so a turn
+that can't show it doesn't run.
+
+The audio file is deleted as soon as it's transcribed; the text is the artefact.
 
 ## Reaching a session you already have open
 
