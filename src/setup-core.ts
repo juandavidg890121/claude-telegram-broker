@@ -144,9 +144,24 @@ export function configPairs(answers: SetupAnswers): Array<[string, string]> {
   return pairs.map(([key, value]) => [key, clean(value)]);
 }
 
-/** A .env value, quoted only when it contains something that needs it. */
+/**
+ * A .env value, quoted for Node's --env-file parser.
+ *
+ * The Windows trap: that parser expands `\n`, `\t` and friends inside *double*
+ * quotes, so a path like `C:\new folder\temp` written `"C:\new folder\temp"`
+ * comes back with a real newline in it — a corruption that only bites Windows
+ * users, and only for folders whose name starts with one of those letters.
+ * Single-quoted values are taken literally, backslashes and all, so a value
+ * that needs quoting is single-quoted whenever it can be (i.e. contains no
+ * single quote of its own). The rare value with a `'` in it — a POSIX path like
+ * /home/o'brien — falls back to double quotes with backslash and quote escaped,
+ * where the lack of a backslash makes the expansion moot.
+ */
 function envValue(value: string): string {
-  return /[\s#"']/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value;
+  if (value === '') return "''";
+  if (!/[\s#"'\\]/.test(value)) return value;
+  if (!value.includes("'")) return `'${value}'`;
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
 /**
@@ -198,6 +213,32 @@ export function validateLanguage(raw: string): string {
     throw new Error(`"${raw}" is not a language — use a two-letter code like es or en, or auto.`);
   }
   return lang;
+}
+
+/**
+ * Strip one matched pair of surrounding quotes, if present.
+ *
+ * Windows Explorer's "Copy as path" wraps the path in double quotes, and people
+ * paste paths that way out of habit, so `"C:\Users\me"` and `'…'` must mean the
+ * same directory as the bare form. Only a *matched* leading+trailing pair is
+ * removed, so a lone quote inside a name survives.
+ */
+export function stripSurroundingQuotes(raw: string): string {
+  const trimmed = raw.trim();
+  const first = trimmed[0];
+  if ((first === '"' || first === "'") && trimmed.at(-1) === first && trimmed.length >= 2) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+/**
+ * A filesystem path the user typed: quotes stripped, ~ expanded. The one funnel
+ * every path input goes through, so pasted-with-quotes and typed-bare land in
+ * the same place on every OS.
+ */
+export function resolvePath(raw: string, home: string): string {
+  return expandHome(stripSurroundingQuotes(raw), home);
 }
 
 /** Expand a leading ~ to the home directory; leave every other path untouched. */

@@ -27,10 +27,15 @@ import {
   validateModelChoice,
   validateModelId,
   validatePermissionMode,
+  resolvePath,
+  stripSurroundingQuotes,
   validateToken,
   validateUserId,
 } from '../src/setup-core.js';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 describe('validateToken', () => {
@@ -182,9 +187,11 @@ describe('renderEnv', () => {
     assert.doesNotMatch(env, /^EVIL=/m, 'the injected line must not stand on its own');
   });
 
-  it('quotes a value that contains spaces', () => {
+  it('single-quotes a value with spaces, so Node never escape-expands it', () => {
+    // Single quotes are literal to Node's --env-file parser; double quotes would
+    // let a Windows path's \n or \t through. See the round-trip suite below.
     const env = renderEnv({ token: 'T:1', allowedUsers: ['1'], defaultCwd: '/home/a b/code' });
-    assert.match(env, /^BROKER_DEFAULT_CWD="\/home\/a b\/code"$/m);
+    assert.match(env, /^BROKER_DEFAULT_CWD='\/home\/a b\/code'$/m);
   });
 
   it('ends with a trailing newline', () => {
@@ -271,6 +278,59 @@ describe('expandHome', () => {
     assert.equal(expandHome('/opt/~/x', '/home/me'), '/opt/~/x', 'a ~ mid-path is a real directory name');
     assert.equal(expandHome('~user/x', '/home/me'), '~user/x', 'only bare ~ is home, not ~user');
   });
+
+  it('expands ~ before a Windows separator too', () => {
+    assert.equal(expandHome('~\\whisper', 'C:\\Users\\me'), 'C:\\Users\\me\\whisper');
+  });
+});
+
+describe('stripSurroundingQuotes', () => {
+  it('removes a matched pair — the shape Windows "Copy as path" produces', () => {
+    assert.equal(stripSurroundingQuotes('"C:\\Users\\me\\whisper"'), 'C:\\Users\\me\\whisper');
+    assert.equal(stripSurroundingQuotes("'/home/me/whisper'"), '/home/me/whisper');
+  });
+
+  it('leaves an unquoted path untouched', () => {
+    assert.equal(stripSurroundingQuotes('  /home/me/whisper  '), '/home/me/whisper');
+  });
+
+  it('does not strip a lone or mismatched quote', () => {
+    assert.equal(stripSurroundingQuotes('"C:\\half'), '"C:\\half');
+    assert.equal(stripSurroundingQuotes("it's here"), "it's here");
+  });
+});
+
+describe('resolvePath', () => {
+  it('accepts a path with or without quotes, then expands ~', () => {
+    // The point of the user's rule: pasted-quoted and typed-bare must agree.
+    assert.equal(resolvePath('~/w', '/home/me'), '/home/me/w');
+    assert.equal(resolvePath('"~/w"', '/home/me'), '/home/me/w');
+    assert.equal(resolvePath("'/opt/w'", '/home/me'), '/opt/w');
+  });
+});
+
+describe('renderEnv survives a Windows path through Node --env-file', () => {
+  // The real integration, not a shape check: write the .env this produces, load
+  // it exactly as `pnpm start` does, and confirm the path came back byte-for-byte
+  // — including a folder whose name starts with n/t, where double-quoting would
+  // let Node's parser expand \n or \t and corrupt it.
+  const cases = [
+    ['C:\\Users\\me\\whisper', 'plain Windows path'],
+    ['C:\\new folder\\temp', 'spaces + \\n and \\t traps'],
+    ['/home/o\'brien/whisper', 'POSIX path with an apostrophe'],
+  ];
+
+  for (const [path, label] of cases) {
+    it(label, () => {
+      const dir = mkdtempSync(join(tmpdir(), 'envrt-'));
+      const file = join(dir, '.env');
+      writeFileSync(file, renderEnv({ token: 'T:1', allowedUsers: ['1'], whisperDir: path }));
+      const script = join(dir, 'read.js');
+      writeFileSync(script, 'process.stdout.write(process.env.BROKER_WHISPER_DIR ?? "MISSING");');
+      const out = execFileSync(process.execPath, [`--env-file=${file}`, script], { encoding: 'utf8' });
+      assert.equal(out, path, `${label} must round-trip unchanged`);
+    });
+  }
 });
 
 describe('whisper model catalog', () => {

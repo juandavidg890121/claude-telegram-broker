@@ -41,7 +41,7 @@ import { audioStatus } from '../src/audio.js';
 import { buildHookConfig, mergeHooks, tsxPath } from '../src/hooks-config.js';
 import {
   collectRequired,
-  expandHome,
+  resolvePath,
   assertPlausibleModel,
   formatSize,
   modelFilename,
@@ -113,10 +113,10 @@ async function optional<T>(
   }
 }
 
-/** An existing directory, ~ expanded. Used for a working directory that must
- *  already be there — creating it silently would hide a typo. */
+/** An existing directory: quotes stripped, ~ expanded. Must already be there —
+ *  creating it silently would hide a typo in a working directory. */
 function existingDir(raw: string): string {
-  const path = expandHome(raw.trim(), homedir());
+  const path = resolvePath(raw, homedir());
   if (!statSync(path, { throwIfNoEntry: false })?.isDirectory()) {
     throw new Error(`"${raw}" is not an existing directory.`);
   }
@@ -126,7 +126,7 @@ function existingDir(raw: string): string {
 /** Create the directory if needed and prove we can actually write to it —
  *  a read-only or bad path should fail here, before a long download, not after. */
 function writableDir(raw: string): string {
-  const path = expandHome(raw.trim(), homedir());
+  const path = resolvePath(raw, homedir());
   mkdirSync(path, { recursive: true });
   const probe = join(path, `.setup-write-test-${process.pid}`);
   try {
@@ -230,21 +230,24 @@ function reportAudioReadiness(dir: string): void {
   }
   if (status.state !== 'incomplete') return;
 
+  const win = process.platform === 'win32';
   for (const missing of status.missing) {
     if (missing.includes('binary')) {
-      say(`    ${dim('!')} whisper.cpp binary not found in ${dir}.`);
+      // audioStatus already looks for whisper-cli.exe on Windows, so the copy
+      // target and command below match what it will actually find.
+      const binary = win ? 'whisper-cli.exe' : 'whisper-cli';
+      say(`    ${dim('!')} whisper.cpp binary (${binary}) not found in ${dir}.`);
       if (process.platform === 'darwin' && onPath('brew')) {
-        say('      Install it with: ' + bold('brew install whisper-cpp') + ', then copy whisper-cli here.');
+        say('      Install it with: ' + bold('brew install whisper-cpp') + `, then copy ${binary} here.`);
       } else {
         say('      Build it (needs cmake + a C++ compiler), see the README "Voice notes" section:');
         say(dim('        git clone --depth 1 https://github.com/ggml-org/whisper.cpp && cd whisper.cpp'));
         say(dim('        cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF'));
         say(dim('        cmake --build build -j --config Release'));
-        say(dim(`        cp build/bin/whisper-cli ${dir}/`));
+        say(dim(win ? `        copy build\\bin\\Release\\${binary} "${dir}"` : `        cp build/bin/${binary} "${dir}/"`));
       }
     } else if (missing.includes('ffmpeg')) {
-      const how =
-        process.platform === 'darwin' ? 'brew install ffmpeg' : process.platform === 'win32' ? 'winget install ffmpeg' : 'apt install ffmpeg';
+      const how = win ? 'winget install ffmpeg' : process.platform === 'darwin' ? 'brew install ffmpeg' : 'apt install ffmpeg';
       say(`    ${dim('!')} ffmpeg not found — install it: ${bold(how)}`);
     }
   }
