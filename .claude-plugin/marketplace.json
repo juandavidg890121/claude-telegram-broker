@@ -8,7 +8,7 @@
     {
       "name": "telegram-broker",
       "source": "./",
-      "description": "Drive Claude Code sessions from Telegram: start new ones, fork or watch sessions you already have open, and approve tool calls from your phone."
+      "description": "Drive Claude Code sessions from Telegram: start new ones, fork or watch sessions you already have open, approve tool calls from your phone, put a prompt on a repeat, and get told when a session is waiting on an answer."
     }
   ]
 }

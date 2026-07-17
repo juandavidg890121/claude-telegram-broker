@@ -1,6 +1,6 @@
 {
   "name": "claude-telegram-broker",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Drive Claude Code sessions from Telegram: create, list, fork, watch, and approve tool calls from your phone.",
   "scripts": {
     "start": "tsx --env-file-if-exists=.env src/index.ts",
