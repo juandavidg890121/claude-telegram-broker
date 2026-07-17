@@ -7,6 +7,7 @@ import { CLAUDE_HOME } from './claude-home.js';
 import { config } from './config.js';
 import { chunkify } from './chunk.js';
 import { audioStatus, transcribe } from './audio.js';
+import { renderTranscript } from './transcript-echo.js';
 
 /**
  * Photos land here for Claude's Read tool to pick up.
@@ -130,6 +131,39 @@ export class TelegramFrontend implements Frontend {
       await this.bot.api.sendMessage(chatId, chunk, {
         message_thread_id: threadId,
       });
+    }
+  }
+
+  /**
+   * Show what was heard, quoted and anchored to the voice note it came from.
+   *
+   * Falls back to plain text if the formatted send is rejected: the transcript
+   * being *visible* is the safety property, and looking good is not. Only when
+   * even that fails does this throw — the caller reads that as "never shown",
+   * and refuses to act on it.
+   */
+  private async echoTranscript(conversationId: string, text: string, replyTo?: number): Promise<void> {
+    const { chatId, threadId } = split(conversationId);
+    try {
+      // Chunk the raw text, then render: chunkify cutting the *escaped* string
+      // could split an `&amp;` down the middle and produce the very 400 the
+      // escaping exists to avoid.
+      const chunks = chunkify(text);
+      for (const [index, chunk] of chunks.entries()) {
+        await this.bot.api.sendMessage(chatId, renderTranscript(chunk, index === 0), {
+          message_thread_id: threadId,
+          parse_mode: 'HTML',
+          // Only the first page quotes the voice note. Telegram would stack the
+          // same audio bubble above every page otherwise, which reads as several
+          // notes rather than one long one.
+          ...(index === 0 && replyTo !== undefined
+            ? { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } }
+            : {}),
+        });
+      }
+    } catch (error) {
+      console.error(`[telegram] formatted echo failed, falling back to plain: ${String(error)}`);
+      await this.sendText(conversationId, `🎙️ ${text}`);
     }
   }
 
@@ -318,17 +352,24 @@ export class TelegramFrontend implements Frontend {
       }
 
       console.log(`[telegram] audio from ${userId} -> "${text.slice(0, 60)}"`);
-      // Echo it back: transcription is a guess, and acting on a misheard
-      // instruction without ever showing what was heard is how you find out
-      // afterwards.
-      await this.sendText(conversationId, `🎙️ ${text}`);
+      // Echo *before* handing it over, and let a failure here abort the turn.
+      // Both halves are deliberate. Going first is what leaves you a window to
+      // /interrupt a misheard instruction; refusing to continue when the echo
+      // could not be delivered is what keeps that window from being skipped —
+      // acting on a transcript you were never shown is the exact hazard this
+      // guards against, so "show it or don't do it" is the invariant.
+      await this.echoTranscript(conversationId, text, ctx.message?.message_id);
 
       msg.text = text;
       await this.messageHandler?.(msg);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       console.error(`[telegram] audio handler failed: ${reason}`);
-      await this.sendText(conversationId, `⚠️ Couldn't transcribe that: ${reason}`).catch(() => {});
+      // "Couldn't transcribe that" was a lie on most of the paths that land
+      // here — downloading, echoing and the handler itself all fail into this
+      // catch, and blaming transcription sends you off to debug whisper when
+      // whisper worked fine.
+      await this.sendText(conversationId, `⚠️ Voice note failed: ${reason}`).catch(() => {});
     }
   }
 
