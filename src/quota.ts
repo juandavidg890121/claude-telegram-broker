@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { CLAUDE_HOME } from './claude-home.js';
+import { MIRROR_ROOT } from './mirror.js';
 
 /**
  * Live quota % (5h/7d) via Anthropic API response headers -- there is no
@@ -10,17 +11,30 @@ import { join } from 'node:path';
  *
  * Ported from the Python original (~/.claude/telegram_mirror/quota_check.py,
  * itself ported from the now-retired telegram_bridge/bridge.py) onto the new
- * stop-hook.ts mirror path -- same cache files, same format, same behavior.
+ * stop-hook.ts mirror path -- same cache format, same behavior.
+ *
+ * Nothing here may throw. It runs inside the Stop hook of a real session, where
+ * a rejected promise ends the turn with an error -- a quota *decoration* taking
+ * down the session it decorates is a far worse bug than showing no quota at
+ * all. So every exported entry point fails open, and the three decisions worth
+ * getting right (freshness, header parsing, alert hysteresis) are pure
+ * functions, testable without a network or a home directory.
  */
 
-const CREDS_PATH = join(homedir(), '.claude', '.credentials.json');
-const CACHE_PATH = join(homedir(), '.claude', 'telegram_mirror', 'quota_cache.json');
-const ALERT_STATE_PATH = join(homedir(), '.claude', 'telegram_mirror', 'quota_alert_state.json');
+// Claude Code's file, at Claude Code's path -- deliberately not derived from
+// MIRROR_ROOT, which happens to sit inside CLAUDE_HOME today but moves the
+// moment anyone sets BROKER_MIRROR_DIR.
+const CREDS_PATH = join(CLAUDE_HOME, '.credentials.json');
+// The cache, on the other hand, is the broker's own state, so it follows the
+// mirror wherever you put it.
+const CACHE_PATH = join(MIRROR_ROOT, 'quota_cache.json');
+const ALERT_STATE_PATH = join(MIRROR_ROOT, 'quota_alert_state.json');
 const CACHE_TTL_SECONDS = 300;
 const ALERT_THRESHOLD = 95;
 
-type Quota = { five_h_pct: number | null; seven_d_pct: number | null; fetched_at: number };
-type AlertState = { five_h_alerted: boolean; seven_d_alerted: boolean };
+export type Quota = { five_h_pct: number | null; seven_d_pct: number | null; fetched_at: number };
+export type AlertState = { five_h_alerted: boolean; seven_d_alerted: boolean };
+type Reading = Quota & { five_h_pct: number; seven_d_pct: number };
 
 function readJson<T>(path: string): T | undefined {
   try {
@@ -30,9 +44,50 @@ function readJson<T>(path: string): T | undefined {
   }
 }
 
+function writeJson(path: string, value: unknown): void {
+  try {
+    mkdirSync(MIRROR_ROOT, { recursive: true });
+    writeFileSync(path, JSON.stringify(value));
+  } catch {
+    // A cache that will not persist costs one extra API call next turn. That is
+    // not worth interrupting a session over.
+  }
+}
+
 function accessToken(): string {
   const creds = JSON.parse(readFileSync(CREDS_PATH, 'utf8'));
   return creds.claudeAiOauth.accessToken;
+}
+
+/** A percentage, or null when the header is missing or not a number. */
+function pct(value: string | null): number | null {
+  if (value === null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.round(parsed * 100) : null;
+}
+
+export function parseQuota(headers: Headers, now: number = Date.now()): Quota {
+  return {
+    five_h_pct: pct(headers.get('anthropic-ratelimit-unified-5h-utilization')),
+    seven_d_pct: pct(headers.get('anthropic-ratelimit-unified-7d-utilization')),
+    fetched_at: now / 1000,
+  };
+}
+
+export function fresh(quota: Quota, now: number = Date.now()): boolean {
+  const age = now / 1000 - quota.fetched_at;
+  // A negative age is a cache written "in the future" by a clock jump. Counting
+  // that as fresh would pin a stale reading until the clock caught up.
+  return age >= 0 && age < CACHE_TTL_SECONDS;
+}
+
+/** Both windows known, or nothing: half a reading is not worth a line of text. */
+export function usable(quota: Quota | undefined): quota is Reading {
+  return quota?.five_h_pct != null && quota.seven_d_pct != null;
+}
+
+export function quotaLine(quota: Reading): string {
+  return `\n\n[cuota 5h ${quota.five_h_pct}% / 7d ${quota.seven_d_pct}%]`;
 }
 
 async function fetchLive(): Promise<Quota> {
@@ -50,65 +105,65 @@ async function fetchLive(): Promise<Quota> {
       messages: [{ role: 'user', content: 'hi' }],
     }),
   });
-  const fiveH = response.headers.get('anthropic-ratelimit-unified-5h-utilization');
-  const sevenD = response.headers.get('anthropic-ratelimit-unified-7d-utilization');
-  return {
-    five_h_pct: fiveH ? Math.round(Number(fiveH) * 100) : null,
-    seven_d_pct: sevenD ? Math.round(Number(sevenD) * 100) : null,
-    fetched_at: Date.now() / 1000,
-  };
+  return parseQuota(response.headers);
 }
 
 /** Cached (300s) quota, or undefined on any failure -- fails open. */
 async function getQuota(): Promise<Quota | undefined> {
   try {
     const cached = readJson<Quota>(CACHE_PATH);
-    if (cached && Date.now() / 1000 - cached.fetched_at < CACHE_TTL_SECONDS) return cached;
-    const fresh = await fetchLive();
-    writeFileSync(CACHE_PATH, JSON.stringify(fresh));
-    return fresh;
+    if (cached && fresh(cached)) return cached;
+    const live = await fetchLive();
+    writeJson(CACHE_PATH, live);
+    return live;
   } catch {
     return undefined;
   }
 }
 
 export async function quotaSuffix(): Promise<string> {
-  const q = await getQuota();
-  if (!q || q.five_h_pct == null || q.seven_d_pct == null) return '';
-  return `\n\n[cuota 5h ${q.five_h_pct}% / 7d ${q.seven_d_pct}%]`;
+  const quota = await getQuota();
+  return usable(quota) ? quotaLine(quota) : '';
 }
 
 /**
- * Returns an alert message the first time either window crosses
- * ALERT_THRESHOLD, then stays silent until that window drops back below it
- * (so a long stretch at 96% doesn't re-alert every message).
+ * Alert the first time a window crosses ALERT_THRESHOLD, then stay silent until
+ * it drops back below -- an hour spent at 96% is one warning, not one per turn.
+ *
+ * Pure, and returns the next state instead of mutating the old one: hysteresis
+ * is the only thing in this file with a memory, which makes it the only thing
+ * that can be quietly wrong for hours before anyone notices.
  */
-export async function checkAlert(): Promise<string | undefined> {
-  const q = await getQuota();
-  if (!q || q.five_h_pct == null || q.seven_d_pct == null) return undefined;
+export function decideAlert(quota: Reading, state: AlertState): { message?: string; state: AlertState } {
+  const next = { ...state };
+  const lines: string[] = [];
 
-  const state: AlertState = readJson<AlertState>(ALERT_STATE_PATH) ?? {
+  if (quota.five_h_pct >= ALERT_THRESHOLD) {
+    if (!next.five_h_alerted) lines.push(`cuota 5h al ${quota.five_h_pct}%`);
+    next.five_h_alerted = true;
+  } else {
+    next.five_h_alerted = false;
+  }
+
+  if (quota.seven_d_pct >= ALERT_THRESHOLD) {
+    if (!next.seven_d_alerted) lines.push(`cuota 7d al ${quota.seven_d_pct}%`);
+    next.seven_d_alerted = true;
+  } else {
+    next.seven_d_alerted = false;
+  }
+
+  return { message: lines.length ? `⚠️ ${lines.join(' y ')}` : undefined, state: next };
+}
+
+export async function checkAlert(): Promise<string | undefined> {
+  const quota = await getQuota();
+  if (!usable(quota)) return undefined;
+
+  const previous = readJson<AlertState>(ALERT_STATE_PATH) ?? {
     five_h_alerted: false,
     seven_d_alerted: false,
   };
-
-  const lines: string[] = [];
-  if (q.five_h_pct >= ALERT_THRESHOLD && !state.five_h_alerted) {
-    lines.push(`cuota 5h al ${q.five_h_pct}%`);
-    state.five_h_alerted = true;
-  } else if (q.five_h_pct < ALERT_THRESHOLD) {
-    state.five_h_alerted = false;
-  }
-
-  if (q.seven_d_pct >= ALERT_THRESHOLD && !state.seven_d_alerted) {
-    lines.push(`cuota 7d al ${q.seven_d_pct}%`);
-    state.seven_d_alerted = true;
-  } else if (q.seven_d_pct < ALERT_THRESHOLD) {
-    state.seven_d_alerted = false;
-  }
-
-  writeFileSync(ALERT_STATE_PATH, JSON.stringify(state));
-
-  if (lines.length === 0) return undefined;
-  return `⚠️ ${lines.join(' y ')}`;
+  const { message, state } = decideAlert(quota, previous);
+  writeJson(ALERT_STATE_PATH, state);
+  return message;
 }

@@ -61,18 +61,7 @@ async function main(): Promise<void> {
 
   await mirrorReply(entry.conversationId, payload.last_assistant_message?.trim());
 
-  const alert = await checkAlert();
-  if (alert) {
-    const { chatId, threadId } = target(entry.conversationId);
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    if (token) {
-      try {
-        await send(token, chatId, threadId, alert);
-      } catch (error) {
-        console.error(`[stop-hook] ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-  }
+  await mirrorAlert(entry.conversationId);
 
   // Arm only if nothing is listening. `stop_hook_active` means this turn is
   // itself the continuation a Stop hook asked for — injecting again from inside
@@ -106,10 +95,14 @@ async function mirrorReply(conversationId: string, text: string | undefined): Pr
 
   const { chatId, threadId } = target(conversationId);
   const chunks = chunkify(text);
+  // Only the last chunk carries it, so a long reply reads as one answer with a
+  // footer rather than a quota reading stapled to every page. It rides along
+  // inside the chunk because chunkify's MAX_LEN leaves ~90 characters of head
+  // room under Telegram's real 4096 cap — enough for this line, which is why it
+  // does not need a message of its own.
   const suffix = await quotaSuffix();
-  if (suffix && chunks.length > 0) {
-    chunks[chunks.length - 1] += suffix;
-  }
+  if (suffix && chunks.length > 0) chunks[chunks.length - 1] += suffix;
+
   for (const chunk of chunks) {
     try {
       await send(token, chatId, threadId, chunk);
@@ -117,6 +110,26 @@ async function mirrorReply(conversationId: string, text: string | undefined): Pr
       // Best-effort: a Telegram hiccup must never fail the real session's turn.
       console.error(`[stop-hook] ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+}
+
+/**
+ * A message of its own, unlike the suffix: crossing 95% is news, and news
+ * appended to the tail of a reply you were not reading is news you miss.
+ *
+ * Silent when unwatched-but-untokened, deliberately — mirrorReply already said
+ * that loudly this turn, and saying it twice per turn trains you to ignore it.
+ */
+async function mirrorAlert(conversationId: string): Promise<void> {
+  const alert = await checkAlert();
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!alert || !token) return;
+
+  const { chatId, threadId } = target(conversationId);
+  try {
+    await send(token, chatId, threadId, alert);
+  } catch (error) {
+    console.error(`[stop-hook] ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
