@@ -33,6 +33,10 @@ every Telegram message already carries is the routing key, so there is no
 
 ## Setup
 
+Linux, macOS, or Windows under WSL2. It runs on native Windows too, but
+answering questions from your phone does not work there — see [Answering
+questions from your phone](#answering-questions-from-your-phone).
+
 ### The quick way: `pnpm configure`
 
 ```bash
@@ -397,69 +401,14 @@ someone's session for ten minutes.
 phone still shows buttons. Tapping a dead one says so rather than answering
 something twice.
 
-### Known issue: this does not work on native Windows (VS Code extension)
-
-Investigated 2026-07-18 against Claude Code 2.1.177 (CLI) / 2.1.214 (VS Code
-extension) on Windows 11. `Stop`, `SessionStart`, and `/loop` all work
-correctly on native Windows — this is specific to the `PreToolUse`/
-`AskUserQuestion` hook.
-
-**Symptom:** `AskUserQuestion` resolves in the VS Code terminal UI as normal,
-but the question never reaches Telegram, and the buttons never appear on the
-phone.
-
-**What was ruled out** (all confirmed with a live process check, not
-guessed):
-- The hook script itself — 100% correct standalone. Piped a real
-  `PreToolUse`-shaped payload into `ask-user-question-hook.ts` directly via
-  `tsx`, bypassing Claude Code entirely: it blocked for the configured
-  timeout, fell through correctly, and reached Telegram when given a real
-  answer. The bug is not in this repo's code.
-- The hook not being invoked at all — it is. A live `Get-CimInstance
-  Win32_Process` check caught the real `tsx`/`node.exe` process alive and
-  running in the background after triggering `AskUserQuestion`, for both the
-  bare-`tsx` command (matching `Stop`'s exact proven-working pattern) and a
-  PowerShell-wrapped variant.
-- `settings.json` location — tried project-local `.claude/settings.local.json`
-  and the documented global `~/.claude/settings.json`, both restarted into
-  fresh sessions. Same symptom either way.
-- Path/quoting issues — tried the bare `.bin/tsx` path (no extension, matches
-  `Stop`), an absolute `node.exe` path both quoted and as an 8.3 short path
-  (`C:\PROGRA~1\nodejs\node.exe`), and a `node -e` inline one-liner with no
-  external script file at all. Same symptom (or a process that spawns and
-  then hangs) every time.
-
-**Root cause, as far as it can be diagnosed from outside Claude Code's own
-source:** the hook process's `stdin` never receives the tool-input JSON, or
-never receives EOF after it, when spawned via `PreToolUse` in this VS Code
-extension host specifically — so `ask-user-question-hook.ts`'s
-`readStdin()` (a plain `for await (const chunk of process.stdin)` loop)
-blocks forever. This matches a documented, known class of Claude Code bug
-on Windows: hook subprocesses receiving `stdin` connected to a
-pseudo-terminal instead of a pipe ([anthropics/claude-code#36156][36156],
-closed as fixed via the `CLAUDE_CODE_GIT_BASH_PATH` env var — tried here
-too, confirmed active via a live process check, did not resolve this
-specific symptom).
-
-**This is not unique to this project.** Two other, independent Claude Code
-+ Telegram/chat relay tools that hook `PreToolUse`/`AskUserQuestion` the
-same way explicitly require macOS or Linux and do not support Windows at
-all: [kidandcat/ccc][ccc] and [jsayubi/ccgram][ccgram] (the latter
-recommends WSL2 for Windows users). No workaround is documented by either.
-
-**The one confirmed-working path**: run Claude Code inside **WSL2** rather
-than natively on Windows. Every implementation of this pattern found during
-this investigation — this repo included, based on today's testing — only
-works where Claude Code's own subprocess/stdin handling goes through a real
-POSIX layer, not the Windows-native one.
-
-If anyone finds an actual fix or workaround for native Windows, please open
-an issue or PR — this section exists so the next person doesn't have to
-re-derive all of the above from scratch.
-
-[36156]: https://github.com/anthropics/claude-code/issues/36156
-[ccc]: https://github.com/kidandcat/ccc
-[ccgram]: https://github.com/jsayubi/ccgram
+**On native Windows, questions do not reach your phone.** Everything else —
+`/watch`, `/fork`, replies, voice notes — works there. The `AskUserQuestion`
+hook resolves in the terminal but never sends, because the hook subprocess's
+`stdin` never receives the tool payload (a Claude Code platform issue, not one
+this repo can fix from its own side — see
+[anthropics/claude-code#36156](https://github.com/anthropics/claude-code/issues/36156)
+for the same class of bug). Run Claude Code under **WSL2** and the whole flow
+works.
 
 ## Commands
 
