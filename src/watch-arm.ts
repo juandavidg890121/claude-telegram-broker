@@ -9,6 +9,16 @@
  * correctness hole.
  */
 
+/** A file:// URL's .pathname for a Windows path is `/C:/Users/...` -- valid
+ *  URL form, but not a path Git Bash resolves: MSYS expects the drive
+ *  letter lowercased and the colon dropped (`/c/Users/...`). Confirmed live
+ *  (2026-07-18): the unconverted form fails a real Monitor-armed poller
+ *  with "No such file or directory" every time, even though it looks like
+ *  a plausible absolute path. A no-op on Linux/macOS, where .pathname
+ *  never has a drive-letter prefix to begin with, so no process.platform
+ *  branch is needed. */
+const toMsysPath = (pathname: string): string => pathname.replace(/^\/([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`);
+
 /** This tree, derived from this file rather than configured. A hook that hard-coded
  *  a path would break the moment the plugin were installed somewhere else, and a
  *  plugin copy would happily point back at the checkout it was copied from.
@@ -19,7 +29,7 @@
  *  (leading `/`, forward slashes) -- fileURLToPath()/path.join() give OS-native
  *  paths instead, which on Windows means a driveless leading segment and
  *  backslashes Git Bash won't resolve the same way. */
-const root = (): string => new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+const root = (): string => toMsysPath(new URL('..', import.meta.url).pathname.replace(/\/$/, ''));
 
 export const pollerCommand = (sessionId: string): string =>
   `${root()}/node_modules/.bin/tsx ${root()}/scripts/mirror/poller.ts ${sessionId}`;

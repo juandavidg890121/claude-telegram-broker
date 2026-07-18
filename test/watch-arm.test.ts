@@ -72,8 +72,12 @@ describe('armInstruction', () => {
 
   it('points at its own tree, not a hardcoded checkout', () => {
     // A copied plugin must arm the copy's poller, not the tree it was copied from.
-    const here = new URL('..', import.meta.url).pathname;
-    assert.ok(pollerCommand('s').startsWith(here.replace(/\/$/, '')));
+    // Same MSYS drive-letter conversion pollerCommand() itself applies -- a no-op
+    // on Linux/macOS, where this pattern never matches to begin with.
+    const here = new URL('..', import.meta.url).pathname
+      .replace(/\/$/, '')
+      .replace(/^\/([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`);
+    assert.ok(pollerCommand('s').startsWith(here));
   });
 
   it('tells the model the things that make arming go wrong', () => {
