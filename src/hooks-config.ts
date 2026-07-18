@@ -1,5 +1,13 @@
-import { join } from 'node:path';
 import { ASK_TIMEOUT_SEC } from './asks.js';
+
+/** These commands go straight into settings.json's hook `command` field, which
+ *  Claude Code runs through Git Bash on Windows too (POSIX shell, not
+ *  cmd.exe/PowerShell) -- so they must always read as POSIX paths. node:path's
+ *  join() gives OS-native separators instead, which on Windows means the
+ *  backslash paths a Git Bash command line was never going to resolve. `root`
+ *  is assumed to already be POSIX-style (see watch-arm.ts's root()), so a
+ *  plain forward-slash join is enough -- no need to branch on process.platform. */
+const join = (...parts: string[]): string => parts.join('/');
 
 /**
  * The /watch hooks, and how to fold them into an existing settings.json.
