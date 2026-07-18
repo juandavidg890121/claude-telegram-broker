@@ -1,4 +1,5 @@
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { formatDuration, parseDuration } from './loops.js';
 
 /**
  * Session<->Telegram mirror liveness: whether the Stop hook is actually
@@ -58,4 +59,119 @@ export class PongStore {
   lastPongAt(sessionId: string): number | null {
     return this.records.find((r) => r.sessionId === sessionId)?.lastPongAt ?? null;
   }
+}
+
+/**
+ * A heartbeat ping consumes a real turn every time it fires — unlike a loop,
+ * which is opt-in per use case, this is meant to be a lightweight liveness
+ * check running quietly in the background. loops.ts's 1-minute floor
+ * (MIN_INTERVAL_MS) is too aggressive for that; 5 minutes is the floor here.
+ */
+export const MIN_HEARTBEAT_INTERVAL_MS = 5 * 60_000;
+
+/** Same duration syntax as parseDuration, with a higher floor. */
+export function parseHeartbeatInterval(text: string): number {
+  const ms = parseDuration(text);
+  if (ms < MIN_HEARTBEAT_INTERVAL_MS) {
+    throw new Error(`Minimum heartbeat interval is ${formatDuration(MIN_HEARTBEAT_INTERVAL_MS)} — "${text}" is shorter.`);
+  }
+  return ms;
+}
+
+export type Heartbeat = {
+  conversationId: string;
+  intervalMs: number;
+  nextPingAt: number;
+  lastPingAt: number | null;
+  escalated: boolean;
+};
+
+/**
+ * One heartbeat per conversation, unlike LoopStore's several-per-conversation
+ * loops — enabling a second one on an already-heartbeating conversation
+ * replaces the first, the same way /reloop replaces a loop's settings but
+ * without needing an id to name which one (there is only ever one).
+ */
+export class HeartbeatStore {
+  private heartbeats: Heartbeat[] = [];
+
+  constructor(private readonly file: string) {
+    try {
+      this.heartbeats = JSON.parse(readFileSync(this.file, 'utf8')) as Heartbeat[];
+    } catch {
+      // No file yet, or corrupt — start empty, same convention as LoopStore.
+    }
+  }
+
+  private flush(): void {
+    const tmp = `${this.file}.tmp`;
+    writeFileSync(tmp, JSON.stringify(this.heartbeats, null, 2));
+    renameSync(tmp, this.file);
+  }
+
+  enable(conversationId: string, intervalMs: number): Heartbeat {
+    this.heartbeats = this.heartbeats.filter((h) => h.conversationId !== conversationId);
+    const hb: Heartbeat = {
+      conversationId,
+      intervalMs,
+      nextPingAt: Date.now() + intervalMs,
+      lastPingAt: null,
+      escalated: false,
+    };
+    this.heartbeats.push(hb);
+    this.flush();
+    return hb;
+  }
+
+  disable(conversationId: string): boolean {
+    const before = this.heartbeats.length;
+    this.heartbeats = this.heartbeats.filter((h) => h.conversationId !== conversationId);
+    if (this.heartbeats.length === before) return false;
+    this.flush();
+    return true;
+  }
+
+  get(conversationId: string): Heartbeat | undefined {
+    return this.heartbeats.find((h) => h.conversationId === conversationId);
+  }
+
+  /** Every heartbeat due to ping right now, each rescheduled for its next
+   *  tick before returning — same contract as LoopStore.takeDue. */
+  takeDue(now: number = Date.now()): Heartbeat[] {
+    const due = this.heartbeats.filter((h) => h.nextPingAt <= now);
+    for (const hb of due) hb.nextPingAt = now + hb.intervalMs;
+    if (due.length) this.flush();
+    return due;
+  }
+
+  /** Records that a ping just went out, and whether it was the escalated
+   *  (urgent) prompt or the normal one — read back by the next tick's
+   *  pong-freshness check in index.ts's deliverHeartbeat. */
+  markPinged(conversationId: string, escalated: boolean): void {
+    const hb = this.heartbeats.find((h) => h.conversationId === conversationId);
+    if (!hb) return;
+    hb.lastPingAt = Date.now();
+    hb.escalated = escalated;
+    this.flush();
+  }
+}
+
+const HEARTBEAT_TICK_MS = 30_000;
+
+/** Identical 30-second-tick, due-item, reschedule-before-return shape to
+ *  startLoopScheduler in loops.ts — kept as its own function rather than a
+ *  shared generic, since the two due-item shapes (Loop vs Heartbeat) differ
+ *  and a shared abstraction over two call sites this small would cost more
+ *  clarity than it saves. */
+export function startHeartbeatScheduler(
+  store: HeartbeatStore,
+  deliver: (hb: Heartbeat) => Promise<void>,
+): NodeJS.Timeout {
+  return setInterval(() => {
+    for (const hb of store.takeDue()) {
+      deliver(hb).catch((error) => {
+        console.error(`[heartbeat] delivery failed for ${hb.conversationId}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+  }, HEARTBEAT_TICK_MS);
 }
