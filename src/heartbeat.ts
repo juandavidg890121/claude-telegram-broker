@@ -156,6 +156,18 @@ export class HeartbeatStore {
   }
 }
 
+/** Fixed prompt text — not user-configurable. This is a liveness check, not
+ *  a second /loop; letting the user supply arbitrary text here would make it
+ *  one, and the escalation message specifically needs to stay accurate about
+ *  what it is asking the session to do. */
+export const HEARTBEAT_PING_PROMPT = 'Heartbeat check — no action needed, just let this turn end normally.';
+
+export const HEARTBEAT_ESCALATED_PROMPT =
+  'URGENT: Telegram communication appears broken — no reply reached the watching ' +
+  'Telegram topic after the last heartbeat ping. Please investigate why the Stop hook ' +
+  'mirror is not delivering (check settings.json hook paths, the broker daemon process, ' +
+  'and TELEGRAM_BOT_TOKEN) and fix it now.';
+
 const HEARTBEAT_TICK_MS = 30_000;
 
 /** Identical 30-second-tick, due-item, reschedule-before-return shape to

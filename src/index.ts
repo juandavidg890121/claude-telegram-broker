@@ -18,10 +18,21 @@ import { startAskWatcher } from './asks.js';
 import { renderPreview } from './preview.js';
 import { blockedMessage, checkAlert, checkBlocked, type QuotaWindow } from './quota.js';
 import { LoopComplaints, LoopStore, formatDuration, parseDuration, startLoopScheduler, type Loop } from './loops.js';
+import {
+  HeartbeatStore,
+  HEARTBEAT_ESCALATED_PROMPT,
+  HEARTBEAT_PING_PROMPT,
+  PongStore,
+  parseHeartbeatInterval,
+  startHeartbeatScheduler,
+  type Heartbeat,
+} from './heartbeat.js';
 import type { Frontend, Inbound } from './frontend.js';
 
 const registry = new Registry(config.stateFile);
 const loops = new LoopStore(config.loopsFile);
+const heartbeats = new HeartbeatStore(config.heartbeatsFile);
+const pongs = new PongStore(config.pongFile);
 const frontend: Frontend = new TelegramFrontend();
 
 const sessions = new SessionManager({
@@ -93,6 +104,11 @@ frontend.onCommand('help', async (msg) => {
       '/loops — list this conversation’s scheduled loops',
       '/unloop <id> — cancel a loop',
       '/reloop <id> <interval> <prompt…> — replace a loop’s interval and prompt',
+      '/heartbeat <interval> — periodically verify Telegram mirroring is alive,',
+      '    e.g. /heartbeat 30m. Minimum 5m. Escalates to an urgent in-session',
+      '    prompt if a ping goes unanswered.',
+      '/heartbeats — show this conversation’s heartbeat, if any',
+      '/unheartbeat — turn it off',
       '/mode [name] — show or change this session’s permission mode',
       '/stop — end this session (the transcript survives; the next message resumes it)',
       '/interrupt — stop what Claude is doing right now',
@@ -674,6 +690,67 @@ async function deliverLoop(loop: Loop): Promise<void> {
   );
 }
 
+/**
+ * A due heartbeat, delivered with the same skip-while-working judgement
+ * deliverLoop makes, plus the freshness check this feature exists for.
+ *
+ * Freshness: has a pong landed since the LAST ping this heartbeat sent? If
+ * hb.lastPingAt is null (first ping ever) there is nothing to check yet —
+ * ping normally. Otherwise compare pongs.lastPongAt(sessionId) against
+ * hb.lastPingAt: a pong strictly after the last ping means that ping's turn
+ * produced a real successful mirror, so the channel is alive. A missing or
+ * stale pong means the last ping went unanswered — escalate.
+ */
+async function deliverHeartbeat(hb: Heartbeat): Promise<void> {
+  if (sessions.isWorking(hb.conversationId)) {
+    console.log(`[heartbeat] ${hb.conversationId} skipped: still working on the last one`);
+    return;
+  }
+
+  const entry = registry.get(hb.conversationId);
+  const sessionId = entry?.sessionId;
+
+  let escalate = false;
+  if (hb.lastPingAt !== null && sessionId) {
+    const lastPong = pongs.lastPongAt(sessionId);
+    escalate = lastPong === null || lastPong <= hb.lastPingAt;
+  }
+
+  const prompt = escalate ? HEARTBEAT_ESCALATED_PROMPT : HEARTBEAT_PING_PROMPT;
+  const outcome = await deliverMessage(hb.conversationId, prompt);
+  heartbeats.markPinged(hb.conversationId, escalate);
+
+  // Delivery-failure reporting mirrors deliverLoop exactly (report once via
+  // the shared LoopComplaints instance, keyed by conversationId since there
+  // is only one heartbeat per conversation — no id to disambiguate several,
+  // unlike a loop). The escalated PROMPT ITSELF (sent to Claude, inside the
+  // session) is unrelated to this — this block is only about telling the
+  // Telegram user the ping couldn't even be delivered at all (session not
+  // listening / no quota), which needs the same "say it once" treatment a
+  // loop's delivery failure gets.
+  if (outcome.status === 'delivered') return;
+  if (!complaints.shouldReport(`heartbeat:${hb.conversationId}`, outcome.status)) return;
+
+  if (outcome.status === 'no-quota') {
+    await frontend.sendText(
+      hb.conversationId,
+      `${blockedMessage(outcome.window, `Heartbeat couldn't ping.`)}\n` +
+        `It keeps trying every ${formatDuration(hb.intervalMs)} and will say nothing more until it lands; ` +
+        `/unheartbeat to stop it.`,
+    );
+    return;
+  }
+
+  await frontend.sendText(
+    hb.conversationId,
+    `💓 Heartbeat couldn't ping — nothing is listening in this watched session. ` +
+      `It keeps trying every ${formatDuration(hb.intervalMs)} and will say nothing more until it lands; ` +
+      `/unheartbeat to stop it.`,
+  );
+}
+
+const heartbeatScheduler = startHeartbeatScheduler(heartbeats, deliverHeartbeat);
+
 const loopScheduler = startLoopScheduler(loops, deliverLoop);
 
 /**
@@ -746,11 +823,49 @@ frontend.onCommand('reloop', async (msg, args) => {
   );
 });
 
+/**
+ * `/heartbeat <interval>` — periodically verify this conversation's Stop-hook
+ * mirror is alive; escalates to an urgent in-session prompt on a miss.
+ */
+frontend.onCommand('heartbeat', async (msg, args) => {
+  const intervalText = args.trim().split(/\s+/)[0] ?? '';
+  if (!intervalText) {
+    throw new Error('/heartbeat <interval> — e.g. /heartbeat 30m. Minimum 5m.\nManage it: /heartbeats, /unheartbeat');
+  }
+  const intervalMs = parseHeartbeatInterval(intervalText);
+  heartbeats.enable(msg.conversationId, intervalMs);
+  await frontend.sendText(
+    msg.conversationId,
+    `💓 Heartbeat set — checking every ${formatDuration(intervalMs)}, first check in ${formatDuration(intervalMs)}.\n/unheartbeat to cancel.`,
+  );
+});
+
+frontend.onCommand('heartbeats', async (msg) => {
+  const hb = heartbeats.get(msg.conversationId);
+  if (!hb) {
+    await frontend.sendText(msg.conversationId, 'No heartbeat in this conversation. /heartbeat <interval> to add one.');
+    return;
+  }
+  const inMs = hb.nextPingAt - Date.now();
+  const nextIn = inMs > 0 ? `next in ${formatDuration(inMs)}` : 'due now';
+  const status = hb.escalated ? '⚠️ escalated — last ping went unanswered' : '✅ healthy';
+  await frontend.sendText(msg.conversationId, `💓 every ${formatDuration(hb.intervalMs)} (${nextIn}) — ${status}`);
+});
+
+frontend.onCommand('unheartbeat', async (msg) => {
+  if (!heartbeats.disable(msg.conversationId)) {
+    throw new Error('No heartbeat in this conversation. /heartbeat <interval> to add one.');
+  }
+  complaints.forget(`heartbeat:${msg.conversationId}`);
+  await frontend.sendText(msg.conversationId, '🛑 Heartbeat cancelled.');
+});
+
 async function shutdown(): Promise<void> {
   console.log('\n[broker] shutting down…');
   // Before stopAll: a tick landing mid-shutdown would push a prompt into a
   // session being torn down.
   clearInterval(loopScheduler);
+  clearInterval(heartbeatScheduler);
   // Same reason, plus one of its own: the heartbeat stops here, so a hook that
   // asks during shutdown sees a dead broker and falls through to its session
   // immediately rather than waiting out a deadline nobody is left to meet.
