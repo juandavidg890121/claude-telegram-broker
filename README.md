@@ -33,6 +33,10 @@ every Telegram message already carries is the routing key, so there is no
 
 ## Setup
 
+Linux, macOS, or Windows under WSL2. It runs on native Windows too, but
+answering questions from your phone does not work there — see [Answering
+questions from your phone](#answering-questions-from-your-phone).
+
 ### The quick way: `pnpm configure`
 
 ```bash
@@ -396,6 +400,15 @@ someone's session for ten minutes.
 **First answer wins.** A watched session can be answered in VS Code while your
 phone still shows buttons. Tapping a dead one says so rather than answering
 something twice.
+
+**On native Windows, questions do not reach your phone.** Everything else —
+`/watch`, `/fork`, replies, voice notes — works there. The `AskUserQuestion`
+hook resolves in the terminal but never sends, because the hook subprocess's
+`stdin` never receives the tool payload (a Claude Code platform issue, not one
+this repo can fix from its own side — see
+[anthropics/claude-code#36156](https://github.com/anthropics/claude-code/issues/36156)
+for the same class of bug). Run Claude Code under **WSL2** and the whole flow
+works.
 
 ## Commands
 

@@ -6,8 +6,9 @@
  * double a hook — a doubled Stop hook mirrors every reply to Telegram twice.
  */
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { ASK_HOOK_TIMEOUT_SEC, buildHookConfig, mergeHooks } from '../src/hooks-config.js';
+import { ASK_HOOK_TIMEOUT_SEC, buildHookConfig, mergeHooks, tsxPath } from '../src/hooks-config.js';
 import { ASK_TIMEOUT_SEC } from '../src/asks.js';
 
 const root = '/opt/broker';
@@ -35,6 +36,27 @@ describe('buildHookConfig', () => {
 
   it('points at the hook that answers, not the one that only notified', () => {
     assert.match(buildHookConfig(root).PreToolUse[0].hooks[0].command, /ask-user-question-hook\.ts$/);
+  });
+
+  it('converts a native Windows root into a command Git Bash can run', () => {
+    // The failure this exists to catch: both callers derive root with
+    // fileURLToPath + join, so on Windows it arrives as `C:\Users\...`. A
+    // config built from that had backslashes in every command and Git Bash
+    // resolved none of them. Passing the native form is what makes this a real
+    // test — a POSIX root cannot tell a broken conversion from a working one.
+    const config = buildHookConfig('C:\\Users\\John Doe\\broker');
+    for (const command of [config.Stop[0].hooks[0].command, config.PreToolUse[0].hooks[0].command]) {
+      assert.doesNotMatch(command, /\\/, 'no OS-native separators');
+      assert.doesNotMatch(command, /%[0-9A-Fa-f]{2}/, 'no percent-encoding');
+      assert.ok(command.startsWith(`'/c/Users/John Doe/broker/node_modules/.bin/tsx'`), 'MSYS form, and quoted: the path has a space');
+    }
+  });
+
+  it('keeps the tsx path native, for the callers that stat it', () => {
+    // setup.ts and print-hooks.ts both existsSync() this. Handing them the Git
+    // Bash form instead would fail that check on Windows every time — which is
+    // why the conversion cannot live any earlier than the command string.
+    assert.equal(tsxPath('C:\\Users\\dev\\broker'), join('C:\\Users\\dev\\broker', 'node_modules', '.bin', 'tsx'));
   });
 
   it('gives the Telegram-sending hooks the .env, and SessionStart none', () => {

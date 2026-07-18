@@ -1,5 +1,6 @@
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { shellArg } from './shell-path.js';
 
 /**
  * The instruction a hook hands the model to arm the /watch poller.
@@ -14,11 +15,23 @@ import { dirname, join } from 'node:path';
 
 /** This tree, derived from this file rather than configured. A hook that hard-coded
  *  a path would break the moment the plugin were installed somewhere else, and a
- *  plugin copy would happily point back at the checkout it was copied from. */
-const root = (): string => join(dirname(fileURLToPath(import.meta.url)), '..');
+ *  plugin copy would happily point back at the checkout it was copied from.
+ *
+ *  fileURLToPath(), not the URL's own .pathname: .pathname is percent-encoded,
+ *  so the default Windows install under `C:\Users\First Last` would reach the
+ *  shell as `First%20Last` and resolve to nothing. Native here; converted to the
+ *  Git Bash form by shellArg() at the command boundary below. */
+const root = (): string => fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '');
 
+/** Goes into a command Claude Code's Monitor tool runs through Git Bash even on
+ *  Windows, so each path is MSYS-form and quoted. sessionId needs neither: it is
+ *  a bare UUID read from the transcript filename. */
 export const pollerCommand = (sessionId: string): string =>
-  `${join(root(), 'node_modules', '.bin', 'tsx')} ${join(root(), 'scripts', 'mirror', 'poller.ts')} ${sessionId}`;
+  [
+    shellArg(join(root(), 'node_modules', '.bin', 'tsx')),
+    shellArg(join(root(), 'scripts', 'mirror', 'poller.ts')),
+    sessionId,
+  ].join(' ');
 
 export function armInstruction(sessionId: string): string {
   return [

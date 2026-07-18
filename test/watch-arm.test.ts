@@ -9,8 +9,9 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 const dir = mkdtempSync(join(tmpdir(), 'broker-state-'));
 const stateFile = join(dir, 'state.json');
@@ -65,15 +66,30 @@ describe('findWatched', () => {
 describe('armInstruction', () => {
   it('names an absolute poller command carrying the session id', () => {
     const command = pollerCommand('session-xyz');
-    assert.ok(command.startsWith('/'), 'absolute, so it works from any cwd');
+    // Leading quote when the checkout path has a space in it, which is the
+    // normal case on Windows and possible anywhere.
+    assert.match(command, /^'?\//, 'absolute, so it works from any cwd');
     assert.ok(command.includes('scripts/mirror/poller.ts'));
     assert.ok(command.endsWith(' session-xyz'));
   });
 
   it('points at its own tree, not a hardcoded checkout', () => {
     // A copied plugin must arm the copy's poller, not the tree it was copied from.
-    const here = new URL('..', import.meta.url).pathname;
-    assert.ok(pollerCommand('s').startsWith(here.replace(/\/$/, '')));
+    // Asserted through the directory name rather than by rebuilding the path the
+    // implementation builds: that version passed even when the transform was
+    // wrong, because the test repeated the same mistake.
+    const treeName = basename(fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, ''));
+    assert.ok(pollerCommand('s').includes(`${treeName}/scripts/mirror/poller.ts`));
+  });
+
+  it('emits a command Git Bash can actually run', () => {
+    // The Windows failure modes, guarded at the seam they escape through:
+    // backslashes Git Bash will not resolve, and the %20 that URL.pathname
+    // produces for the default `C:\Users\First Last` install.
+    const command = pollerCommand('s');
+    assert.doesNotMatch(command, /\\/, 'no OS-native separators');
+    assert.doesNotMatch(command, /%[0-9A-Fa-f]{2}/, 'no percent-encoding');
+    assert.ok(command.endsWith(' s'), 'session id stays a bare trailing argument');
   });
 
   it('tells the model the things that make arming go wrong', () => {
