@@ -2,12 +2,15 @@ import { Bot, InlineKeyboard, type Context, type Filter } from 'grammy';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { CommandHandler, Frontend, Inbound, PermissionAsk } from './frontend.js';
+import type { CommandHandler, Frontend, Inbound, PermissionAsk, QuestionAsk } from './frontend.js';
+import type { AskAnswers, AskQuestion } from './asks.js';
 import { CLAUDE_HOME } from './claude-home.js';
 import { config } from './config.js';
 import { chunkify } from './chunk.js';
 import { audioStatus, transcribe } from './audio.js';
 import { renderTranscript } from './transcript-echo.js';
+import { type AskCallback, askCallbackData, parseAskCallback, renderQuestion, toAnswers } from './ask-user-question.js';
+import { FreeTextCapture } from './ask-capture.js';
 
 /**
  * Photos land here for Claude's Read tool to pick up.
@@ -30,6 +33,30 @@ const AUDIO_DIR = join(CLAUDE_HOME, 'telegram_audio');
 type Pending = { resolve: (allowed: boolean) => void };
 
 /**
+ * One AskUserQuestion in flight: which options are ticked so far, and where each
+ * question's message lives so it can be edited as you answer it.
+ *
+ * `picked` is keyed by question index rather than text — the text is long, and
+ * the callback data that arrives from a tap only carries indices anyway.
+ */
+type PendingAsk = {
+  questions: AskQuestion[];
+  picked: Map<number, string[]>;
+  /** question index -> Telegram message id, for editing it in place. */
+  messages: Map<number, number>;
+  conversationId: string;
+  chatId: number;
+  threadId?: number;
+  settle: (answers: AskAnswers | undefined) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+/** Button captions stay short; the full label is in the message body above. */
+const BUTTON_MAX = 32;
+const buttonLabel = (label: string): string =>
+  label.length > BUTTON_MAX ? `${label.slice(0, BUTTON_MAX - 1)}…` : label;
+
+/**
  * The single owner of the bot token. Telegram's getUpdates allows exactly one
  * poller per token, which is precisely why the broker exists as one long-lived
  * process rather than one poller per Claude session.
@@ -39,6 +66,8 @@ export class TelegramFrontend implements Frontend {
 
   private readonly bot: Bot;
   private readonly pending = new Map<string, Pending>();
+  private readonly pendingAsks = new Map<string, PendingAsk>();
+  private readonly capture = new FreeTextCapture();
   private messageHandler?: (msg: Inbound) => Promise<void>;
   private readonly commands = new Map<string, CommandHandler>();
 
@@ -186,6 +215,115 @@ export class TelegramFrontend implements Frontend {
     });
   }
 
+  /**
+   * Put an AskUserQuestion on the phone and wait for every question to be
+   * answered.
+   *
+   * One message per question, each with its own keyboard, rather than one
+   * message for all of them: a keyboard belongs to a message, so four questions
+   * in one message would need sixteen buttons in a single grid with no way to
+   * tell which row answers what.
+   */
+  async askQuestions(conversationId: string, ask: QuestionAsk): Promise<AskAnswers | undefined> {
+    const { chatId, threadId } = split(conversationId);
+    const questions = ask.questions.filter((question) => question.options?.length > 0);
+
+    // A question with no options cannot be answered with buttons, and answering
+    // *some* of a multi-question ask would hand the tool a partial payload it
+    // has no way to flag. Refusing the whole thing sends it back to the terminal
+    // intact, which is the only place it can still be answered properly.
+    if (questions.length === 0 || questions.length !== ask.questions.length) return undefined;
+
+    if (ask.note) await this.sendText(conversationId, ask.note).catch(() => {});
+
+    const answered = new Promise<AskAnswers | undefined>((resolve) => {
+      const timer = setTimeout(
+        () => void this.expireAsk(ask.id),
+        Math.max(0, ask.expiresAt - Date.now()),
+      );
+      // unref so a pending question never keeps the process alive through a
+      // shutdown that has already closed everything else.
+      timer.unref?.();
+      this.pendingAsks.set(ask.id, {
+        questions,
+        picked: new Map(),
+        messages: new Map(),
+        conversationId,
+        chatId,
+        threadId,
+        settle: resolve,
+        timer,
+      });
+    });
+
+    const pending = this.pendingAsks.get(ask.id)!;
+    try {
+      for (const [index, question] of questions.entries()) {
+        const sent = await this.bot.api.sendMessage(chatId, renderQuestion(question, index, questions.length), {
+          message_thread_id: threadId,
+          reply_markup: this.askKeyboard(ask.id, index, question, []),
+        });
+        pending.messages.set(index, sent.message_id);
+      }
+    } catch (error) {
+      // Half the questions posted is not a state anyone can answer out of.
+      // Give up cleanly so the caller falls back rather than hanging.
+      console.error(`[telegram] could not post questions: ${String(error)}`);
+      this.finishAsk(ask.id, undefined);
+    }
+
+    return answered;
+  }
+
+  private askKeyboard(id: string, index: number, question: AskQuestion, picked: string[]): InlineKeyboard {
+    const keyboard = new InlineKeyboard();
+    for (const [optionIndex, option] of question.options.entries()) {
+      const ticked = question.multiSelect && picked.includes(option.label) ? '✅ ' : '';
+      keyboard.text(`${ticked}${buttonLabel(option.label)}`, askCallbackData(id, index, optionIndex)).row();
+    }
+    // On every question, always. The options are Claude's guesses at what you
+    // might want; the whole reason to ask is that it does not know, so a
+    // question you can only answer from its own list is one where a wrong guess
+    // silently becomes your instruction.
+    keyboard.text('✏️ Other…', askCallbackData(id, index, 'other')).row();
+    // Only multi-select needs a commit step: a single choice is complete the
+    // moment it is tapped, and a Done button there is one tap of pure ceremony.
+    if (question.multiSelect) keyboard.text('☑️ Done', askCallbackData(id, index, 'done'));
+    return keyboard;
+  }
+
+  /** Settle a question set once, cleaning up the timer and the map. */
+  private finishAsk(id: string, answers: AskAnswers | undefined): void {
+    const pending = this.pendingAsks.get(id);
+    if (!pending) return;
+    this.pendingAsks.delete(id);
+    clearTimeout(pending.timer);
+    // Before settling: a question that is over must not still be able to eat the
+    // next thing you type. This is the one line standing between "I answered it"
+    // and a message meant for Claude vanishing into a resolved promise.
+    this.capture.clearAsk(id);
+    pending.settle(answers);
+  }
+
+  private async expireAsk(id: string): Promise<void> {
+    const pending = this.pendingAsks.get(id);
+    if (!pending) return;
+    this.finishAsk(id, undefined);
+
+    // Strip the keyboards. Buttons that no longer do anything are worse than no
+    // buttons: they read as a question still waiting for you.
+    for (const messageId of pending.messages.values()) {
+      await this.bot.api
+        .editMessageReplyMarkup(pending.chatId, messageId, { reply_markup: undefined })
+        .catch(() => {});
+    }
+    await this.bot.api
+      .sendMessage(pending.chatId, '⌛ That question timed out — answer it in the session itself.', {
+        message_thread_id: pending.threadId,
+      })
+      .catch(() => {});
+  }
+
   async createConversation(title: string, from: Inbound): Promise<string> {
     const groupId = config.telegram.groupId;
     if (!groupId) {
@@ -219,6 +357,10 @@ export class TelegramFrontend implements Frontend {
     // A throwing handler must not take the broker down with it — report it in
     // the chat where the human can act on it.
     try {
+      // Before the command dispatch, but isTypedAnswer refuses anything starting
+      // with '/', so a question waiting on you never swallows /stop.
+      if (await this.captureTypedAnswer(msg.conversationId, text)) return;
+
       if (text.startsWith('/')) {
         const [word, ...rest] = text.slice(1).split(/\s+/);
         const handler = this.commands.get(word.split('@')[0]);
@@ -360,6 +502,12 @@ export class TelegramFrontend implements Frontend {
       // guards against, so "show it or don't do it" is the invariant.
       await this.echoTranscript(conversationId, text, ctx.message?.message_id);
 
+      // A voice note is a typed answer that was spoken. Routing it to the
+      // session instead would be its own trap: you tapped Other, dictated the
+      // answer, and it went to Claude as a fresh message while the question sat
+      // there still waiting.
+      if (await this.captureTypedAnswer(conversationId, text)) return;
+
       msg.text = text;
       await this.messageHandler?.(msg);
     } catch (error) {
@@ -375,15 +523,24 @@ export class TelegramFrontend implements Frontend {
 
   private async handleCallback(ctx: Filter<Context, 'callback_query:data'>): Promise<void> {
     const userId = String(ctx.from.id);
-    const [kind, id, verdict] = ctx.callbackQuery.data.split(':');
-    if (kind !== 'perm') return;
+    const data = ctx.callbackQuery.data;
 
-    // Anyone who can answer a permission prompt can approve tool use on this
-    // machine — so the allowlist gates the buttons too.
+    // Anyone who can tap these buttons can approve tool use on this machine, or
+    // decide what Claude does next — so the allowlist gates them exactly as it
+    // gates messages. Checked before the dispatch, so it covers both kinds.
     if (!config.telegram.allowedUsers.has(userId)) {
       await ctx.answerCallbackQuery({ text: 'Not allowed.' });
       return;
     }
+
+    const askCallback = parseAskCallback(data);
+    if (askCallback) {
+      await this.handleAskCallback(ctx, askCallback);
+      return;
+    }
+
+    const [kind, id, verdict] = data.split(':');
+    if (kind !== 'perm') return;
 
     const waiter = this.pending.get(id);
     if (!waiter) {
@@ -395,6 +552,148 @@ export class TelegramFrontend implements Frontend {
     waiter.resolve(verdict === 'allow');
     await ctx.answerCallbackQuery({ text: verdict === 'allow' ? 'Allowed' : 'Denied' });
     await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+  }
+
+  /**
+   * One tap on an AskUserQuestion.
+   *
+   * Single-select commits on the tap. Multi-select toggles, redrawing the
+   * keyboard with ticks, and commits on Done — with at least one option, since
+   * an empty answer for a question the tool asked is not an answer.
+   */
+  private async handleAskCallback(
+    ctx: Filter<Context, 'callback_query:data'>,
+    callback: AskCallback,
+  ): Promise<void> {
+    const pending = this.pendingAsks.get(callback.id);
+    if (!pending) {
+      // Expired, already answered, or answered in the session itself while the
+      // phone still showed buttons.
+      await ctx.answerCallbackQuery({ text: 'That question is no longer open.' });
+      await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {});
+      return;
+    }
+
+    const question = pending.questions[callback.questionIndex];
+    if (!question) {
+      await ctx.answerCallbackQuery({ text: 'Unknown question.' });
+      return;
+    }
+
+    const picked = pending.picked.get(callback.questionIndex) ?? [];
+
+    if (callback.choice === 'other') {
+      this.capture.arm(pending.conversationId, { askId: callback.id, questionIndex: callback.questionIndex });
+      await ctx.answerCallbackQuery({ text: 'Type your answer' });
+      const header = question.header ? `[${question.header}] ` : '';
+      await this.sendText(
+        pending.conversationId,
+        `✏️ ${header}Type your answer as the next message and it becomes the answer to this ` +
+          `question. Tap an option instead to go back to the list; commands still work.`,
+      ).catch(() => {});
+      return;
+    }
+
+    // Any other tap means you changed your mind about typing. Leaving it armed
+    // would have your next ordinary message answer a question you just decided
+    // with a button.
+    this.capture.clearAsk(callback.id);
+
+    if (callback.choice === 'done') {
+      if (picked.length === 0) {
+        await ctx.answerCallbackQuery({ text: 'Pick at least one first.' });
+        return;
+      }
+      await ctx.answerCallbackQuery({ text: picked.join(', ') });
+      await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {});
+      this.settleIfComplete(callback.id);
+      return;
+    }
+
+    const label = question.options[callback.choice]?.label;
+    if (!label) {
+      await ctx.answerCallbackQuery({ text: 'Unknown option.' });
+      return;
+    }
+
+    if (question.multiSelect) {
+      const next = picked.includes(label) ? picked.filter((l) => l !== label) : [...picked, label];
+      pending.picked.set(callback.questionIndex, next);
+      await ctx.answerCallbackQuery({ text: next.length ? next.join(', ') : 'Nothing picked' });
+      await ctx
+        .editMessageReplyMarkup({
+          reply_markup: this.askKeyboard(callback.id, callback.questionIndex, question, next),
+        })
+        .catch(() => {});
+      return;
+    }
+
+    pending.picked.set(callback.questionIndex, [label]);
+    await ctx.answerCallbackQuery({ text: label });
+    // Replace the keyboard with the answer in the text. The tapped button is
+    // otherwise indistinguishable from the ones you did not tap, and a phone
+    // scrolled back to two questions ago should still say what you chose.
+    await ctx
+      .editMessageText(`${renderQuestion(question, callback.questionIndex, pending.questions.length)}\n\n✔️ ${label}`, {
+        reply_markup: undefined,
+      })
+      .catch(() => {});
+    this.settleIfComplete(callback.id);
+  }
+
+  /**
+   * Take a typed message as the answer to the question that asked for it.
+   *
+   * Returns true when it was consumed, which is the caller's signal to stop —
+   * this message was an answer, not something to hand the session.
+   *
+   * A typed answer commits its question outright, multi-select included, rather
+   * than joining the ticks and waiting for Done. You typed a considered
+   * sentence; making you then press a button to confirm it is ceremony, and a
+   * typed answer sitting un-committed next to some ticks is a state nobody can
+   * read off the screen.
+   */
+  private async captureTypedAnswer(conversationId: string, text: string): Promise<boolean> {
+    const awaiting = this.capture.consume(conversationId, text);
+    if (!awaiting) return false;
+
+    const pending = this.pendingAsks.get(awaiting.askId);
+    if (!pending) return false; // Settled between the tap and the typing.
+
+    const answer = text.trim();
+    const alreadyTicked = pending.picked.get(awaiting.questionIndex) ?? [];
+    pending.picked.set(awaiting.questionIndex, [...alreadyTicked, answer]);
+
+    const messageId = pending.messages.get(awaiting.questionIndex);
+    const question = pending.questions[awaiting.questionIndex];
+    if (messageId !== undefined && question) {
+      // Record it on the question itself. Scrolled back to later, a bare
+      // keyboard says nothing about what you typed three messages ago.
+      await this.bot.api
+        .editMessageText(
+          pending.chatId,
+          messageId,
+          `${renderQuestion(question, awaiting.questionIndex, pending.questions.length)}\n\n✔️ ${answer}`,
+          { reply_markup: undefined },
+        )
+        .catch(() => {});
+    }
+
+    this.settleIfComplete(awaiting.askId);
+    return true;
+  }
+
+  /** Resolve once every question has a pick — not before, and only once. */
+  private settleIfComplete(id: string): void {
+    const pending = this.pendingAsks.get(id);
+    if (!pending) return;
+
+    const complete = pending.questions.every(
+      (_question, index) => (pending.picked.get(index) ?? []).length > 0,
+    );
+    if (!complete) return;
+
+    this.finishAsk(id, toAnswers(pending.questions, pending.picked));
   }
 }
 

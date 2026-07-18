@@ -33,6 +33,13 @@ export function target(conversationId: string): { chatId: string; threadId?: num
   return { chatId, threadId: threadId > 0 ? threadId : undefined };
 }
 
+/**
+ * Where the Bot API lives. Overridable only so the hooks can be exercised
+ * against a local server: a hook test that reaches the real api.telegram.org
+ * needs the network, a live token, and somebody's actual phone to go off.
+ */
+const apiBase = (): string => process.env.TELEGRAM_API_BASE ?? 'https://api.telegram.org';
+
 /** Raw sendMessage. Throws on a non-2xx so the caller can decide what that means. */
 export async function send(
   token: string,
@@ -40,7 +47,7 @@ export async function send(
   threadId: number | undefined,
   text: string,
 ): Promise<void> {
-  const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  const response = await fetch(`${apiBase()}/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text, message_thread_id: threadId }),

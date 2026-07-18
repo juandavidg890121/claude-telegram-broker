@@ -147,8 +147,8 @@ pnpm run print-hooks
       "/abs/path/to/repo/node_modules/.bin/tsx --env-file-if-exists=/abs/path/to/repo/.env /abs/path/to/repo/scripts/mirror/stop-hook.ts" }] }],
     "SessionStart": [{ "hooks": [{ "type": "command", "command":
       "/abs/path/to/repo/node_modules/.bin/tsx /abs/path/to/repo/scripts/mirror/session-start-hook.ts" }] }],
-    "PreToolUse": [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command":
-      "/abs/path/to/repo/node_modules/.bin/tsx --env-file-if-exists=/abs/path/to/repo/.env /abs/path/to/repo/scripts/mirror/ask-user-question-notify.ts" }] }]
+    "PreToolUse": [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "timeout": 630, "command":
+      "/abs/path/to/repo/node_modules/.bin/tsx --env-file-if-exists=/abs/path/to/repo/.env /abs/path/to/repo/scripts/mirror/ask-user-question-hook.ts" }] }]
   }
 }
 ```
@@ -165,15 +165,18 @@ pnpm run print-hooks
    sessions opened after you watched them; `Stop` catches sessions that were
    already open, at the end of their next turn.
 
-   The third is different: it tells you when the session is **waiting on you**.
+   The third is different: it lets you **answer** the session from your phone.
    Claude asking a multiple-choice question (`AskUserQuestion`) isn't a
-   permission prompt and never reaches the broker, so a question posed in a VS
-   Code window you aren't looking at just sits there — indistinguishable from
-   the session having finished. `PreToolUse` pushes the question and its options
-   to the topic the moment it's asked. You still answer in VS Code: nothing in
-   the SDK can inject a reply into a question already in flight. Pair it with
-   [`askUserQuestionTimeout`](https://code.claude.com/docs/en/settings) so a
-   question nobody ever answers doesn't block the session forever.
+   permission prompt and never reaches the broker on its own, so a question posed
+   in a VS Code window you aren't looking at just sits there — indistinguishable
+   from the session having finished. `PreToolUse` sends the question to the topic
+   as buttons, waits for your tap, and hands the answer back to the session. See
+   [Answering questions from your phone](#answering-questions-from-your-phone).
+
+   Its `timeout` is not decoration: the hook blocks for as long as it is willing
+   to wait for you, so a `timeout` at or below that has Claude Code kill it just
+   before it can report back. `print-hooks` derives one from the other; if you
+   change `BROKER_ASK_TIMEOUT_SEC`, re-run it.
 
    **Use an absolute path, and point it at the same tree the broker runs from.**
    Three traps here.
@@ -322,7 +325,8 @@ Where the `.env` lives depends on how you run the broker:
 | `BROKER_MODEL` | the SDK's default | Model for spawned sessions, e.g. `claude-opus-4-8`. |
 | `BROKER_PERMISSION_MODE` | `default` | Baseline behaviour for tools **not** in `BROKER_ASK_TOOLS`. See below. |
 | `BROKER_ASK_TOOLS` | `Bash,Write,Edit,NotebookEdit` | Tools that **always** require an Allow/Deny confirmation in Telegram. |
-| `BROKER_MIRROR_DIR` | `~/.claude/telegram_mirror` | Where `/watch` leaves messages for a watched session, one subdirectory per session id. The broker and the poller armed inside the watched session both read it, so change it for both or neither. |
+| `BROKER_MIRROR_DIR` | `~/.claude/telegram_mirror` | Where `/watch` leaves messages for a watched session, one subdirectory per session id, plus the questions going the other way. The broker, the poller armed inside the watched session, and the `AskUserQuestion` hook all read it, so change it for all three or none. |
+| `BROKER_ASK_TIMEOUT_SEC` | `600` | How long an `AskUserQuestion` waits for you to tap before falling back — see [Answering questions from your phone](#answering-questions-from-your-phone). Change it and re-run `pnpm run print-hooks`: the hook's own `timeout` in `settings.json` is derived from this and must stay above it. |
 | `BROKER_WHISPER_DIR` | unset — **audio off** | Directory holding a local `whisper.cpp` and a model. Set it to transcribe voice notes; see [Voice notes](#voice-notes-optional). Unset, a voice note gets a short "audio is off" reply rather than silence. |
 | `BROKER_WHISPER_MODEL` | first `ggml-*.bin` found | Model filename inside `BROKER_WHISPER_DIR`, when you keep several. Named but absent is an error, not a fallback to another model. |
 | `BROKER_WHISPER_LANGUAGE` | `auto` | Spoken-language hint (`es`, `en`, …). `auto` detects per message; naming the language is slightly faster and more accurate if you always speak the same one. |
@@ -344,6 +348,54 @@ matter what. `BROKER_PERMISSION_MODE` decides what happens to *everything else*:
 The practical consequence: `BROKER_ASK_TOOLS` is the real gate, and
 `BROKER_PERMISSION_MODE` only tunes the background. Tightening the mode does not
 compensate for emptying the ask list.
+
+`AskUserQuestion` is not in this table and cannot be removed from it. It is not a
+permission gate — see below.
+
+## Answering questions from your phone
+
+When Claude needs you to choose between options it calls `AskUserQuestion`, and
+that is not a permission prompt: the answer isn't yes or no, it's *content* that
+becomes the tool's result and steers everything after it. The question arrives in
+the topic as buttons. Tap one and the session carries on with your choice, as if
+you had picked at the keyboard.
+
+This works the same from both sides, by different routes:
+
+- **`/new` and `/fork`** — the broker drives the session, so the question arrives
+  in-process and never touches disk.
+- **`/watch`** — the broker isn't driving anything, so the `PreToolUse` hook
+  inside that session leaves the question in `BROKER_MIRROR_DIR` and blocks while
+  the broker puts it on your phone. It needs the hooks installed; see
+  [Reaching a session you already have open](#reaching-a-session-you-already-have-open).
+
+Every question also carries **✏️ Other…**, always. The options are Claude's
+guesses at what you might want, and the reason it is asking is that it doesn't
+know — so a question you can only answer from its own list turns a wrong guess
+into your instruction. Tap Other and the next message you send becomes the
+answer, in whatever words you like: *"neither, use the migration that's already
+there"*. A voice note works too, since it's text by the time it arrives.
+
+A typed answer commits its question outright, multi-select included — you typed a
+considered sentence, pressing Done afterwards is ceremony. Tapping a normal
+option instead goes back to the list, and commands still work while Other is
+waiting, so `/stop` is always a way out.
+
+Multi-select questions toggle and finish with **Done**. A question with several
+parts sends one message each and only resolves once all of them are answered.
+
+**Nothing is left hanging.** After `BROKER_ASK_TIMEOUT_SEC` (10 minutes by
+default) the buttons stop working and are stripped, and the question falls back
+to the place it came from: in a watched session it goes up in that session's own
+UI, which is where you would have answered it before any of this existed; in a
+brokered one Claude is told nobody answered and to proceed on its best judgement,
+saying which assumption it made. The same fallback covers the broker not running
+at all — the hook checks first and returns immediately rather than stalling
+someone's session for ten minutes.
+
+**First answer wins.** A watched session can be answered in VS Code while your
+phone still shows buttons. Tapping a dead one says so rather than answering
+something twice.
 
 ## Commands
 
@@ -628,19 +680,29 @@ only when it should. Filesystem only — no API, no token, ~150ms. Uses the Node
 test runner, so it adds no dependency.
 
 ```bash
-pnpm smoke       # real API, ~2 min, costs tokens
+pnpm smoke        # real API, ~2 min, costs tokens
 pnpm smoke:fork
+pnpm smoke:watch
 ```
 
 `smoke` drives the `SessionManager` against a real Claude session with a fake
-frontend and checks the four things everything else rests on: the session id is
+frontend and checks the five things everything else rests on: the session id is
 captured, one live session remembers across turns, a stopped session resumes from
-disk, and a `Bash` call is gated through the permission callback.
+disk, a `Bash` call is gated through the permission callback, and an
+`AskUserQuestion` answered from the fake frontend comes back as the tool's
+result.
 
 `smoke:fork` checks the three promises `/fork` makes that no offline test can:
 the working directory really does resolve from the session id alone, the fork
 carries the original's context (it's asked to recall a codeword only the original
-was told), and the original transcript doesn't grow. Both exit non-zero on
+was told), and the original transcript doesn't grow.
+
+`smoke:watch` runs the whole `/watch` answering chain — real session, real hook,
+a stand-in phone — in a temp sandbox with its own mirror directory and state
+file, so it can't touch a live watched session. It's the only test that can check
+the claim the feature stands on: that Claude Code takes `updatedInput` from a
+`PreToolUse` hook and resolves the question with it. Every unit test around it
+can pass while that contract has quietly changed. All three exit non-zero on
 failure.
 
 ## Extending it

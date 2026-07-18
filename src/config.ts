@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { ASK_TIMEOUT_SEC } from './asks.js';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -74,6 +75,17 @@ export const config = {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
+  /**
+   * How long an AskUserQuestion waits for a tap before giving up.
+   *
+   * Ten minutes, because the whole premise is that you are not at the keyboard
+   * and a phone in a pocket routinely takes minutes to reach. Bounded at all
+   * because the question blocks a real turn: on the /watch path the hook holds
+   * that session open for exactly this long, which is why it must stay under the
+   * `timeout` on the hook entry — hooks-config.ts derives that from
+   * ASK_TIMEOUT_SEC so the two cannot drift apart.
+   */
+  askTimeoutMs: ASK_TIMEOUT_SEC * 1000,
 };
 
 if (config.telegram.allowedUsers.size === 0) {

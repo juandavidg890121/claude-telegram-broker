@@ -7,7 +7,8 @@
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { buildHookConfig, mergeHooks } from '../src/hooks-config.js';
+import { ASK_HOOK_TIMEOUT_SEC, buildHookConfig, mergeHooks } from '../src/hooks-config.js';
+import { ASK_TIMEOUT_SEC } from '../src/asks.js';
 
 const root = '/opt/broker';
 
@@ -19,8 +20,21 @@ describe('buildHookConfig', () => {
   });
 
   it('scopes the AskUserQuestion hook with a matcher', () => {
-    // Without it, a PreToolUse hook fires on every tool call in the session.
+    // Without it, a PreToolUse hook blocks on every tool call in the session.
     assert.equal(buildHookConfig(root).PreToolUse[0].matcher, 'AskUserQuestion');
+  });
+
+  it('gives the AskUserQuestion hook longer than it will wait', () => {
+    // It blocks for the full ASK_TIMEOUT_SEC waiting for a tap. A `timeout` at
+    // or below that has Claude Code kill it moments before it reports back,
+    // turning the clean "nobody answered" path into a killed process every time.
+    const entry = buildHookConfig(root).PreToolUse[0].hooks[0];
+    assert.equal(entry.timeout, ASK_HOOK_TIMEOUT_SEC);
+    assert.ok(ASK_HOOK_TIMEOUT_SEC > ASK_TIMEOUT_SEC, 'the hook must outlive its own wait');
+  });
+
+  it('points at the hook that answers, not the one that only notified', () => {
+    assert.match(buildHookConfig(root).PreToolUse[0].hooks[0].command, /ask-user-question-hook\.ts$/);
   });
 
   it('gives the Telegram-sending hooks the .env, and SessionStart none', () => {
