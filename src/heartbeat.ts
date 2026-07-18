@@ -175,9 +175,11 @@ export const HEARTBEAT_PING_PROMPT = 'Heartbeat check — no action needed, just
 
 export const HEARTBEAT_ESCALATED_PROMPT =
   'URGENT: Telegram communication appears broken — no reply reached the watching ' +
-  'Telegram topic after the last heartbeat ping. Please investigate why the Stop hook ' +
+  'Telegram topic after the last heartbeat ping. Investigate why the Stop hook ' +
   'mirror is not delivering (check settings.json hook paths, the broker daemon process, ' +
-  'and TELEGRAM_BOT_TOKEN) and fix it now.';
+  'and TELEGRAM_BOT_TOKEN) and fix it now — this takes priority over anything else in ' +
+  'progress. Once communication is confirmed working again, resume whatever you were ' +
+  'doing before this ping interrupted it.';
 
 const HEARTBEAT_TICK_MS = 30_000;
 
