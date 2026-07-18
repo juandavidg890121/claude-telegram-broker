@@ -665,7 +665,33 @@ async function deliverLoop(loop: Loop): Promise<void> {
     return;
   }
 
-  const outcome = await deliverMessage(loop.conversationId, loop.prompt);
+  // Not a replay queue: a blocked fire's prompt is never independently
+  // re-sent (that would turn a long block into a burst of paid turns the
+  // instant quota resets). Instead the next fire that actually lands carries
+  // a note about how many were missed, so the session knows there may be a
+  // gap to catch up on.
+  const missed = loop.missedFires;
+  const prompt = missed > 0
+    ? `[Note: ${missed} scheduled fire${missed > 1 ? 's' : ''} of this loop were missed since ` +
+      `${new Date(loop.missedSince!).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })} ` +
+      `(quota exhausted or session unavailable). There may be a backlog of pending work — ` +
+      `consider catching up on anything accumulated in that gap.]\n\n${loop.prompt}`
+    : loop.prompt;
+
+  const outcome = await deliverMessage(loop.conversationId, prompt);
+
+  if (outcome.status === 'delivered') {
+    if (missed > 0) {
+      loops.clearMisses(loop.id);
+      await frontend.sendText(
+        loop.conversationId,
+        `🔁 Loop ${loop.id} landed again — ${missed} missed fire${missed > 1 ? 's' : ''} collapsed into this one.`,
+      );
+    }
+  } else {
+    loops.recordMiss(loop.id);
+  }
+
   if (!complaints.shouldReport(loop.id, outcome.status)) return;
 
   // Muted after the first one, like the not-listening case and for the same
@@ -718,7 +744,14 @@ async function deliverHeartbeat(hb: Heartbeat): Promise<void> {
 
   const prompt = escalate ? HEARTBEAT_ESCALATED_PROMPT : HEARTBEAT_PING_PROMPT;
   const outcome = await deliverMessage(hb.conversationId, prompt);
-  heartbeats.markPinged(hb.conversationId, escalate);
+  // Only a real delivery counts as "pinged" -- marking it on a blocked
+  // outcome (no-quota / not-listening) recorded a phantom lastPingAt with no
+  // prompt ever reaching the session, so the next real ping after the block
+  // clears compared pongs against a timestamp nothing could have answered,
+  // forcing a false HEARTBEAT_ESCALATED_PROMPT the first time it fired again.
+  if (outcome.status === 'delivered') {
+    heartbeats.markPinged(hb.conversationId, escalate);
+  }
 
   // Delivery-failure reporting mirrors deliverLoop exactly (report once via
   // the shared LoopComplaints instance, keyed by conversationId since there

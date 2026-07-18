@@ -20,6 +20,12 @@ export type Loop = {
   prompt: string;
   nextFireAt: number;
   createdAt: number;
+  /** How many scheduled fires were blocked (quota/not-listening) since the
+   *  last one that actually delivered — see recordMiss/clearMisses. Not a
+   *  replay queue: a blocked fire's prompt is never re-sent on its own, this
+   *  is only a count the next successful fire can mention. */
+  missedFires: number;
+  missedSince: number | null;
 };
 
 const DURATION = /^(\d+)(s|m|h|d)$/;
@@ -61,6 +67,12 @@ export class LoopStore {
   constructor(private readonly file: string) {
     try {
       this.loops = JSON.parse(readFileSync(this.file, 'utf8')) as Loop[];
+      // Legacy records predate missedFires/missedSince — normalize on load
+      // rather than force a migration script for two fields with an obvious default.
+      for (const loop of this.loops) {
+        loop.missedFires ??= 0;
+        loop.missedSince ??= null;
+      }
     } catch {
       // No file yet — start empty, same convention as Registry.
     }
@@ -91,6 +103,8 @@ export class LoopStore {
       prompt,
       nextFireAt: Date.now() + intervalMs,
       createdAt: Date.now(),
+      missedFires: 0,
+      missedSince: null,
     };
     this.loops.push(loop);
     this.flush();
@@ -117,6 +131,9 @@ export class LoopStore {
     loop.intervalMs = intervalMs;
     loop.prompt = prompt;
     loop.nextFireAt = Date.now() + intervalMs;
+    // A new prompt shouldn't inherit the old prompt's miss history.
+    loop.missedFires = 0;
+    loop.missedSince = null;
     this.flush();
     return loop;
   }
@@ -127,6 +144,24 @@ export class LoopStore {
     for (const loop of due) loop.nextFireAt = now + loop.intervalMs;
     if (due.length) this.flush();
     return due;
+  }
+
+  /** A scheduled fire was blocked (quota/not-listening) — count it, don't replay it. */
+  recordMiss(id: string): void {
+    const loop = this.loops.find((l) => l.id === id);
+    if (!loop) return;
+    loop.missedFires += 1;
+    loop.missedSince ??= Date.now();
+    this.flush();
+  }
+
+  /** A fire landed — whatever backlog it was carrying is now the news it delivered. */
+  clearMisses(id: string): void {
+    const loop = this.loops.find((l) => l.id === id);
+    if (!loop || loop.missedFires === 0) return;
+    loop.missedFires = 0;
+    loop.missedSince = null;
+    this.flush();
   }
 }
 
