@@ -30,11 +30,22 @@ const CREDS_PATH = join(CLAUDE_HOME, '.credentials.json');
 const CACHE_PATH = join(MIRROR_ROOT, 'quota_cache.json');
 const ALERT_STATE_PATH = join(MIRROR_ROOT, 'quota_alert_state.json');
 const CACHE_TTL_SECONDS = 300;
-const ALERT_THRESHOLD = 95;
+const ALERT_THRESHOLD = 90;
 
-export type Quota = { five_h_pct: number | null; seven_d_pct: number | null; fetched_at: number };
+export type Quota = {
+  five_h_pct: number | null;
+  seven_d_pct: number | null;
+  /** Unix seconds when each window rolls over, straight from the reset headers. */
+  five_h_reset: number | null;
+  seven_d_reset: number | null;
+  /** The API's own verdict per window: 'allowed' while it will still serve you. */
+  five_h_status: string | null;
+  seven_d_status: string | null;
+  fetched_at: number;
+};
 export type AlertState = { five_h_alerted: boolean; seven_d_alerted: boolean };
 type Reading = Quota & { five_h_pct: number; seven_d_pct: number };
+export type QuotaWindow = { label: string; pct: number; reset: number | null; status: string | null };
 
 function readJson<T>(path: string): T | undefined {
   try {
@@ -66,12 +77,57 @@ function pct(value: string | null): number | null {
   return Number.isFinite(parsed) ? Math.round(parsed * 100) : null;
 }
 
+/** A unix-seconds timestamp, or null when the header is missing or not a number. */
+function epoch(value: string | null): number | null {
+  if (value === null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export function parseQuota(headers: Headers, now: number = Date.now()): Quota {
   return {
     five_h_pct: pct(headers.get('anthropic-ratelimit-unified-5h-utilization')),
     seven_d_pct: pct(headers.get('anthropic-ratelimit-unified-7d-utilization')),
+    five_h_reset: epoch(headers.get('anthropic-ratelimit-unified-5h-reset')),
+    seven_d_reset: epoch(headers.get('anthropic-ratelimit-unified-7d-reset')),
+    five_h_status: headers.get('anthropic-ratelimit-unified-5h-status'),
+    seven_d_status: headers.get('anthropic-ratelimit-unified-7d-status'),
     fetched_at: now / 1000,
   };
+}
+
+/** The two windows as one shape, so nothing below has to say "5h" twice. */
+function windows(quota: Reading): QuotaWindow[] {
+  return [
+    { label: '5h', pct: quota.five_h_pct, reset: quota.five_h_reset ?? null, status: quota.five_h_status ?? null },
+    { label: '7d', pct: quota.seven_d_pct, reset: quota.seven_d_reset ?? null, status: quota.seven_d_status ?? null },
+  ];
+}
+
+/**
+ * "at 2:30 PM (in 1h 20min)" -- the clock time answers "can I go to lunch", the
+ * relative one answers it without making you work out what timezone the broker
+ * thinks it is in.
+ *
+ * The locale is pinned rather than left to the host: an unset LANG makes
+ * toLocaleTimeString fall back to whatever the machine happens to be, so the
+ * same broker would phrase the same reading differently on two boxes. English
+ * for now, like every other string the broker sends; a BROKER_LOCALE is the
+ * obvious place to hang a language setting when one is wanted.
+ */
+export function resetPhrase(reset: number | null, now: number = Date.now()): string {
+  if (reset === null) return 'shortly (the API did not say when)';
+  const clock = new Date(reset * 1000).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  const minutes = Math.max(0, Math.round((reset * 1000 - now) / 60_000));
+  // Days, because the weekly window resets two or three days out and "in 50h
+  // 16min" is a number you have to sit and convert before it means anything.
+  const relative =
+    minutes >= 1_440
+      ? `${Math.floor(minutes / 1_440)}d ${Math.floor((minutes % 1_440) / 60)}h`
+      : minutes >= 60
+        ? `${Math.floor(minutes / 60)}h ${minutes % 60}min`
+        : `${minutes}min`;
+  return `at ${clock} (in ${relative})`;
 }
 
 export function fresh(quota: Quota, now: number = Date.now()): boolean {
@@ -87,7 +143,7 @@ export function usable(quota: Quota | undefined): quota is Reading {
 }
 
 export function quotaLine(quota: Reading): string {
-  return `\n\n[cuota 5h ${quota.five_h_pct}% / 7d ${quota.seven_d_pct}%]`;
+  return `\n\n[quota 5h ${quota.five_h_pct}% / 7d ${quota.seven_d_pct}%]`;
 }
 
 async function fetchLive(): Promise<Quota> {
@@ -134,25 +190,77 @@ export async function quotaSuffix(): Promise<string> {
  * is the only thing in this file with a memory, which makes it the only thing
  * that can be quietly wrong for hours before anyone notices.
  */
-export function decideAlert(quota: Reading, state: AlertState): { message?: string; state: AlertState } {
+export function decideAlert(
+  quota: Reading,
+  state: AlertState,
+  now: number = Date.now(),
+): { message?: string; state: AlertState } {
   const next = { ...state };
   const lines: string[] = [];
+  const [fiveH, sevenD] = windows(quota);
 
-  if (quota.five_h_pct >= ALERT_THRESHOLD) {
-    if (!next.five_h_alerted) lines.push(`cuota 5h al ${quota.five_h_pct}%`);
+  if (fiveH.pct >= ALERT_THRESHOLD) {
+    if (!next.five_h_alerted) lines.push(`5h quota at ${fiveH.pct}% — resets ${resetPhrase(fiveH.reset, now)}`);
     next.five_h_alerted = true;
   } else {
     next.five_h_alerted = false;
   }
 
-  if (quota.seven_d_pct >= ALERT_THRESHOLD) {
-    if (!next.seven_d_alerted) lines.push(`cuota 7d al ${quota.seven_d_pct}%`);
+  if (sevenD.pct >= ALERT_THRESHOLD) {
+    if (!next.seven_d_alerted) lines.push(`7d quota at ${sevenD.pct}% — resets ${resetPhrase(sevenD.reset, now)}`);
     next.seven_d_alerted = true;
   } else {
     next.seven_d_alerted = false;
   }
 
-  return { message: lines.length ? `⚠️ ${lines.join(' y ')}` : undefined, state: next };
+  // One line per window now that each carries a reset time: joined with "y" on
+  // one line, the two clock times read as one confusing sentence.
+  return { message: lines.length ? `⚠️ ${lines.join('\n⚠️ ')}` : undefined, state: next };
+}
+
+/**
+ * The window that is actually refusing work, if any.
+ *
+ * `status` is the API's own verdict and outranks the percentage: utilization is
+ * rounded for display, so 99.6% prints as "100%" while requests still go
+ * through. Only when the header is missing does the percentage decide.
+ *
+ * A reading is cached for up to 5 minutes, which is long enough to outlive the
+ * reset it describes -- so a blocked window whose reset time has already passed
+ * is treated as recovered. Wrongly blocking a message the API would have served
+ * is the worse of the two failures: it is silence the user cannot appeal.
+ */
+export function blockedWindow(quota: Reading, now: number = Date.now()): QuotaWindow | undefined {
+  return windows(quota).find((window) => {
+    const blocked = window.status ? window.status !== 'allowed' : window.pct >= 100;
+    return blocked && (window.reset === null || window.reset * 1000 > now);
+  });
+}
+
+/**
+ * `consequence` is the caller's, not this module's: the same reading stops a
+ * message someone just typed and a loop that fired on a timer, and "your message
+ * was not sent" is plainly untrue of the second.
+ */
+export function blockedMessage(window: QuotaWindow, consequence: string, now: number = Date.now()): string {
+  return `🛑 ${window.label} quota is used up (${window.pct}%). ${consequence}\nIt resets ${resetPhrase(window.reset, now)}.`;
+}
+
+/**
+ * The window refusing work right now, or undefined to carry on.
+ *
+ * Hands back the window rather than a finished sentence so the caller can say
+ * what it means for *them* -- see blockedMessage.
+ *
+ * Fails open like everything else here: an unreadable cache, a dead network or
+ * a half reading all mean "let the message through". Silence is the bug being
+ * fixed -- swallowing messages because the quota check itself broke would just
+ * move it.
+ */
+export async function checkBlocked(): Promise<QuotaWindow | undefined> {
+  const quota = await getQuota();
+  if (!usable(quota)) return undefined;
+  return blockedWindow(quota);
 }
 
 export async function checkAlert(): Promise<string | undefined> {

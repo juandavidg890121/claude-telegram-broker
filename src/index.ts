@@ -16,6 +16,7 @@ import { TelegramFrontend } from './telegram.js';
 import { heartbeatFresh, writeInboxMessage } from './mirror.js';
 import { startAskWatcher } from './asks.js';
 import { renderPreview } from './preview.js';
+import { blockedMessage, checkAlert, checkBlocked, type QuotaWindow } from './quota.js';
 import { LoopComplaints, LoopStore, formatDuration, parseDuration, startLoopScheduler, type Loop } from './loops.js';
 import type { Frontend, Inbound } from './frontend.js';
 
@@ -28,6 +29,14 @@ const sessions = new SessionManager({
   emit: (conversationId, text) => frontend.sendText(conversationId, text),
   confirm: (conversationId, ask) => frontend.askPermission(conversationId, ask),
   ask: (conversationId, ask) => frontend.askQuestions(conversationId, ask),
+  // The broker-owned half of what the Stop hook already does for watched
+  // sessions. Without it the 90% warning only ever reaches sessions running in
+  // someone's VS Code — the ones driven from the phone would burn through the
+  // window and find out by being ignored.
+  turnEnded: async (conversationId) => {
+    const alert = await checkAlert();
+    if (alert) await frontend.sendText(conversationId, alert);
+  },
 });
 
 /**
@@ -538,8 +547,10 @@ frontend.onCommand('stop', async (msg) => {
 
 /** Whether a prompt reached the session, and if not, why — the caller decides
  *  what that is worth saying, because the answer differs for a person who just
- *  typed and a timer that fired. */
-type Delivery = 'delivered' | 'not-listening';
+ *  typed and a timer that fired. `no-quota` carries the window it read, because
+ *  that reading is gone by the time the caller reacts and asking again would
+ *  answer about a different minute. */
+type Delivery = { status: 'delivered' | 'not-listening' } | { status: 'no-quota'; window: QuotaWindow };
 
 /**
  * Deliver text into a conversation exactly as if the user had typed it —
@@ -553,6 +564,16 @@ type Delivery = 'delivered' | 'not-listening';
  * forever, to a topic whose session had simply been closed.
  */
 async function deliverMessage(conversationId: string, text: string): Promise<Delivery> {
+  // Checked before delivering, not after: text pushed into a session with no
+  // quota left is answered by nothing at all — the turn dies wherever it dies
+  // and the topic simply stays quiet. Refusing here is the difference between
+  // "the broker is broken" and "you are out of quota until 4:10 PM".
+  //
+  // Above the watch split because both sides spend the same quota: a watched
+  // session runs in someone's VS Code, but it bills to the same account.
+  const blocked = await checkBlocked();
+  if (blocked) return { status: 'no-quota', window: blocked };
+
   const entry =
     registry.get(conversationId) ?? sessions.register(conversationId, config.defaultCwd, 'default');
 
@@ -562,17 +583,25 @@ async function deliverMessage(conversationId: string, text: string): Promise<Del
     // lease, a lease has false positives, and a suspended laptop is
     // indistinguishable from a closed one. Refusing is always safe; guessing
     // is not. /fork is the answer when the session really is gone.
-    if (!heartbeatFresh(entry.sessionId)) return 'not-listening';
+    if (!heartbeatFresh(entry.sessionId)) return { status: 'not-listening' };
     writeInboxMessage(entry.sessionId, text);
-    return 'delivered';
+    return { status: 'delivered' };
   }
 
   await sessions.send(conversationId, text);
-  return 'delivered';
+  return { status: 'delivered' };
 }
 
 frontend.onMessage(async (msg: Inbound) => {
-  if ((await deliverMessage(msg.conversationId, msg.text)) === 'delivered') return;
+  const outcome = await deliverMessage(msg.conversationId, msg.text);
+  if (outcome.status === 'delivered') return;
+
+  // Every fire, unlike the loop below: a person who just typed is owed an answer
+  // to the message they typed, and "you are out of quota" is that answer.
+  if (outcome.status === 'no-quota') {
+    await frontend.sendText(msg.conversationId, blockedMessage(outcome.window, 'Your message was not sent.'));
+    return;
+  }
 
   const entry = registry.get(msg.conversationId);
   // Name all three ways back. The commonest cause is a closed VS Code window —
@@ -621,7 +650,21 @@ async function deliverLoop(loop: Loop): Promise<void> {
   }
 
   const outcome = await deliverMessage(loop.conversationId, loop.prompt);
-  if (!complaints.shouldReport(loop.id, outcome)) return;
+  if (!complaints.shouldReport(loop.id, outcome.status)) return;
+
+  // Muted after the first one, like the not-listening case and for the same
+  // reason: a 30m loop against a 5-hour window would otherwise post the same
+  // refusal ten times, each with a countdown one interval shorter than the last.
+  // The loop is not broken and needs no action, so it says so once.
+  if (outcome.status === 'no-quota') {
+    await frontend.sendText(
+      loop.conversationId,
+      `${blockedMessage(outcome.window, `Loop ${loop.id} couldn't fire.`)}\n` +
+        `It keeps trying every ${formatDuration(loop.intervalMs)} and will say nothing more until it lands; ` +
+        `/unloop ${loop.id} to stop it.`,
+    );
+    return;
+  }
 
   await frontend.sendText(
     loop.conversationId,

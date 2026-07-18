@@ -96,7 +96,7 @@ async function mirrorReply(conversationId: string, text: string | undefined): Pr
 }
 
 /**
- * A message of its own, unlike the suffix: crossing 95% is news, and news
+ * A message of its own, unlike the suffix: crossing 90% is news, and news
  * appended to the tail of a reply you were not reading is news you miss.
  *
  * Silent when unwatched-but-untokened, deliberately — mirrorReply already said
