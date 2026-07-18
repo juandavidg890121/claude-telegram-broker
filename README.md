@@ -369,6 +369,18 @@ This works the same from both sides, by different routes:
   the broker puts it on your phone. It needs the hooks installed; see
   [Reaching a session you already have open](#reaching-a-session-you-already-have-open).
 
+Every question also carries **✏️ Other…**, always. The options are Claude's
+guesses at what you might want, and the reason it is asking is that it doesn't
+know — so a question you can only answer from its own list turns a wrong guess
+into your instruction. Tap Other and the next message you send becomes the
+answer, in whatever words you like: *"neither, use the migration that's already
+there"*. A voice note works too, since it's text by the time it arrives.
+
+A typed answer commits its question outright, multi-select included — you typed a
+considered sentence, pressing Done afterwards is ceremony. Tapping a normal
+option instead goes back to the list, and commands still work while Other is
+waiting, so `/stop` is always a way out.
+
 Multi-select questions toggle and finish with **Done**. A question with several
 parts sends one message each and only resolves once all of them are answered.
 
@@ -381,13 +393,9 @@ saying which assumption it made. The same fallback covers the broker not running
 at all — the hook checks first and returns immediately rather than stalling
 someone's session for ten minutes.
 
-Two limits worth knowing:
-
-- **Buttons only.** The desktop UI always offers a free-text "Other"; here you
-  pick from what Claude offered or let it time out.
-- **First answer wins.** A watched session can be answered in VS Code while your
-  phone still shows buttons. Tapping a dead one says so rather than answering
-  something twice.
+**First answer wins.** A watched session can be answered in VS Code while your
+phone still shows buttons. Tapping a dead one says so rather than answering
+something twice.
 
 ## Commands
 

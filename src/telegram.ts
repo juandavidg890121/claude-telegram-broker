@@ -9,7 +9,8 @@ import { config } from './config.js';
 import { chunkify } from './chunk.js';
 import { audioStatus, transcribe } from './audio.js';
 import { renderTranscript } from './transcript-echo.js';
-import { askCallbackData, parseAskCallback, renderQuestion, toAnswers } from './ask-user-question.js';
+import { type AskCallback, askCallbackData, parseAskCallback, renderQuestion, toAnswers } from './ask-user-question.js';
+import { FreeTextCapture } from './ask-capture.js';
 
 /**
  * Photos land here for Claude's Read tool to pick up.
@@ -43,6 +44,7 @@ type PendingAsk = {
   picked: Map<number, string[]>;
   /** question index -> Telegram message id, for editing it in place. */
   messages: Map<number, number>;
+  conversationId: string;
   chatId: number;
   threadId?: number;
   settle: (answers: AskAnswers | undefined) => void;
@@ -65,6 +67,7 @@ export class TelegramFrontend implements Frontend {
   private readonly bot: Bot;
   private readonly pending = new Map<string, Pending>();
   private readonly pendingAsks = new Map<string, PendingAsk>();
+  private readonly capture = new FreeTextCapture();
   private messageHandler?: (msg: Inbound) => Promise<void>;
   private readonly commands = new Map<string, CommandHandler>();
 
@@ -245,6 +248,7 @@ export class TelegramFrontend implements Frontend {
         questions,
         picked: new Map(),
         messages: new Map(),
+        conversationId,
         chatId,
         threadId,
         settle: resolve,
@@ -277,6 +281,11 @@ export class TelegramFrontend implements Frontend {
       const ticked = question.multiSelect && picked.includes(option.label) ? '✅ ' : '';
       keyboard.text(`${ticked}${buttonLabel(option.label)}`, askCallbackData(id, index, optionIndex)).row();
     }
+    // On every question, always. The options are Claude's guesses at what you
+    // might want; the whole reason to ask is that it does not know, so a
+    // question you can only answer from its own list is one where a wrong guess
+    // silently becomes your instruction.
+    keyboard.text('✏️ Other…', askCallbackData(id, index, 'other')).row();
     // Only multi-select needs a commit step: a single choice is complete the
     // moment it is tapped, and a Done button there is one tap of pure ceremony.
     if (question.multiSelect) keyboard.text('☑️ Done', askCallbackData(id, index, 'done'));
@@ -289,6 +298,10 @@ export class TelegramFrontend implements Frontend {
     if (!pending) return;
     this.pendingAsks.delete(id);
     clearTimeout(pending.timer);
+    // Before settling: a question that is over must not still be able to eat the
+    // next thing you type. This is the one line standing between "I answered it"
+    // and a message meant for Claude vanishing into a resolved promise.
+    this.capture.clearAsk(id);
     pending.settle(answers);
   }
 
@@ -344,6 +357,10 @@ export class TelegramFrontend implements Frontend {
     // A throwing handler must not take the broker down with it — report it in
     // the chat where the human can act on it.
     try {
+      // Before the command dispatch, but isTypedAnswer refuses anything starting
+      // with '/', so a question waiting on you never swallows /stop.
+      if (await this.captureTypedAnswer(msg.conversationId, text)) return;
+
       if (text.startsWith('/')) {
         const [word, ...rest] = text.slice(1).split(/\s+/);
         const handler = this.commands.get(word.split('@')[0]);
@@ -485,6 +502,12 @@ export class TelegramFrontend implements Frontend {
       // guards against, so "show it or don't do it" is the invariant.
       await this.echoTranscript(conversationId, text, ctx.message?.message_id);
 
+      // A voice note is a typed answer that was spoken. Routing it to the
+      // session instead would be its own trap: you tapped Other, dictated the
+      // answer, and it went to Claude as a fresh message while the question sat
+      // there still waiting.
+      if (await this.captureTypedAnswer(conversationId, text)) return;
+
       msg.text = text;
       await this.messageHandler?.(msg);
     } catch (error) {
@@ -540,7 +563,7 @@ export class TelegramFrontend implements Frontend {
    */
   private async handleAskCallback(
     ctx: Filter<Context, 'callback_query:data'>,
-    callback: { id: string; questionIndex: number; choice: number | 'done' },
+    callback: AskCallback,
   ): Promise<void> {
     const pending = this.pendingAsks.get(callback.id);
     if (!pending) {
@@ -558,6 +581,23 @@ export class TelegramFrontend implements Frontend {
     }
 
     const picked = pending.picked.get(callback.questionIndex) ?? [];
+
+    if (callback.choice === 'other') {
+      this.capture.arm(pending.conversationId, { askId: callback.id, questionIndex: callback.questionIndex });
+      await ctx.answerCallbackQuery({ text: 'Type your answer' });
+      const header = question.header ? `[${question.header}] ` : '';
+      await this.sendText(
+        pending.conversationId,
+        `✏️ ${header}Type your answer as the next message and it becomes the answer to this ` +
+          `question. Tap an option instead to go back to the list; commands still work.`,
+      ).catch(() => {});
+      return;
+    }
+
+    // Any other tap means you changed your mind about typing. Leaving it armed
+    // would have your next ordinary message answer a question you just decided
+    // with a button.
+    this.capture.clearAsk(callback.id);
 
     if (callback.choice === 'done') {
       if (picked.length === 0) {
@@ -599,6 +639,48 @@ export class TelegramFrontend implements Frontend {
       })
       .catch(() => {});
     this.settleIfComplete(callback.id);
+  }
+
+  /**
+   * Take a typed message as the answer to the question that asked for it.
+   *
+   * Returns true when it was consumed, which is the caller's signal to stop —
+   * this message was an answer, not something to hand the session.
+   *
+   * A typed answer commits its question outright, multi-select included, rather
+   * than joining the ticks and waiting for Done. You typed a considered
+   * sentence; making you then press a button to confirm it is ceremony, and a
+   * typed answer sitting un-committed next to some ticks is a state nobody can
+   * read off the screen.
+   */
+  private async captureTypedAnswer(conversationId: string, text: string): Promise<boolean> {
+    const awaiting = this.capture.consume(conversationId, text);
+    if (!awaiting) return false;
+
+    const pending = this.pendingAsks.get(awaiting.askId);
+    if (!pending) return false; // Settled between the tap and the typing.
+
+    const answer = text.trim();
+    const alreadyTicked = pending.picked.get(awaiting.questionIndex) ?? [];
+    pending.picked.set(awaiting.questionIndex, [...alreadyTicked, answer]);
+
+    const messageId = pending.messages.get(awaiting.questionIndex);
+    const question = pending.questions[awaiting.questionIndex];
+    if (messageId !== undefined && question) {
+      // Record it on the question itself. Scrolled back to later, a bare
+      // keyboard says nothing about what you typed three messages ago.
+      await this.bot.api
+        .editMessageText(
+          pending.chatId,
+          messageId,
+          `${renderQuestion(question, awaiting.questionIndex, pending.questions.length)}\n\n✔️ ${answer}`,
+          { reply_markup: undefined },
+        )
+        .catch(() => {});
+    }
+
+    this.settleIfComplete(awaiting.askId);
+    return true;
   }
 
   /** Resolve once every question has a pick — not before, and only once. */

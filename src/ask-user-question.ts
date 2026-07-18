@@ -55,16 +55,23 @@ export function renderQuestion(question: AskQuestion, index: number, total: numb
   const lines = question.options.map(
     (option) => `• ${option.label}${option.description ? ` — ${option.description}` : ''}`,
   );
+  // Named rather than left to be discovered. Other is how you answer a question
+  // whose real answer Claude did not think of — which is exactly the case where
+  // you are least likely to go hunting for an extra button.
+  const other = '\n✏️ Other — tap it and type your own answer.';
   const multi = question.multiSelect ? '\n\nPick any, then press Done.' : '';
-  return `❓${counter} ${header}${question.question}\n\n${lines.join('\n')}${multi}`;
+  return `❓${counter} ${header}${question.question}\n\n${lines.join('\n')}${other}${multi}`;
 }
 
+/** An option by index, the multi-select commit, or "none of these, let me type". */
+export type AskChoice = number | 'done' | 'other';
+
 /** Telegram caps callback_data at 64 bytes, so this carries indices, never labels. */
-export function askCallbackData(id: string, questionIndex: number, choice: number | 'done'): string {
+export function askCallbackData(id: string, questionIndex: number, choice: AskChoice): string {
   return `ask:${id}:${questionIndex}:${choice}`;
 }
 
-export type AskCallback = { id: string; questionIndex: number; choice: number | 'done' };
+export type AskCallback = { id: string; questionIndex: number; choice: AskChoice };
 
 /** The inverse. Undefined for anything that is not one of ours, or is malformed. */
 export function parseAskCallback(data: string): AskCallback | undefined {
@@ -73,7 +80,7 @@ export function parseAskCallback(data: string): AskCallback | undefined {
 
   const questionIndex = Number(question);
   if (!Number.isInteger(questionIndex) || questionIndex < 0) return undefined;
-  if (choice === 'done') return { id, questionIndex, choice: 'done' };
+  if (choice === 'done' || choice === 'other') return { id, questionIndex, choice };
 
   const optionIndex = Number(choice);
   if (!Number.isInteger(optionIndex) || optionIndex < 0) return undefined;

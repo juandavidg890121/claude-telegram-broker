@@ -129,7 +129,20 @@ describe('renderQuestion', () => {
     // The buttons show labels only, so a body without descriptions makes you
     // choose between two words with no idea what either means.
     const text = renderQuestion(question(), 0, 1);
-    assert.equal(text, '❓ [Library] Which library?\n\n• React — pick React\n• Vue — pick Vue');
+    assert.equal(
+      text,
+      '❓ [Library] Which library?\n\n• React — pick React\n• Vue — pick Vue\n' +
+        '✏️ Other — tap it and type your own answer.',
+    );
+  });
+
+  it('offers Other on every question, whatever shape it is', () => {
+    // The options are Claude's guesses at what you might want. A question you
+    // can only answer from its own list turns a wrong guess into your
+    // instruction — the opposite of why it asked.
+    for (const shape of [question(), question({ multiSelect: true }), question({ header: undefined })]) {
+      assert.match(renderQuestion(shape, 0, 1), /✏️ Other/);
+    }
   });
 
   it('numbers itself only when there is more than one question', () => {
@@ -163,13 +176,23 @@ describe('ask callback data', () => {
     });
   });
 
+  it('round-trips Other', () => {
+    assert.deepEqual(parseAskCallback(askCallbackData('abc123', 1, 'other')), {
+      id: 'abc123',
+      questionIndex: 1,
+      choice: 'other',
+    });
+  });
+
   it('fits Telegram’s 64-byte callback_data cap at the worst case', () => {
     // Ids are 12 hex characters and AskUserQuestion allows at most four
     // questions of four options. Labels are deliberately not in here; one long
     // enough would push a real tap over the cap and Telegram rejects the
     // *message*, so the question would never appear at all.
-    const worst = askCallbackData('a'.repeat(12), 3, 3);
-    assert.ok(Buffer.byteLength(worst) <= 64, `${worst} is ${Buffer.byteLength(worst)} bytes`);
+    for (const choice of [3, 'done', 'other'] as const) {
+      const worst = askCallbackData('a'.repeat(12), 3, choice);
+      assert.ok(Buffer.byteLength(worst) <= 64, `${worst} is ${Buffer.byteLength(worst)} bytes`);
+    }
   });
 
   it('ignores callbacks that are not ours', () => {
