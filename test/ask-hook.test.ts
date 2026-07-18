@@ -23,7 +23,12 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const HOOK = join(root, 'scripts', 'mirror', 'ask-user-question-hook.ts');
-const TSX = join(root, 'node_modules', '.bin', 'tsx');
+// node_modules/.bin/tsx has no extension -- on Windows that's not directly
+// spawnable (pnpm puts the real Windows entry at tsx.CMD/tsx.ps1 instead, and
+// plain spawn() without shell:true can't resolve either). Going straight at
+// tsx's own CLI entrypoint through the current Node binary sidesteps shim
+// resolution entirely, so it works the same on every platform.
+const TSX_CLI = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 
 const SESSION = '11111111-2222-3333-4444-555555555555';
 const CONVERSATION = '-1001234567890:42';
@@ -53,7 +58,7 @@ const payload = (overrides: Record<string, unknown> = {}) =>
 type Run = { stdout: string; stderr: string; code: number | null };
 
 function runHook(stdin: string, env: Record<string, string> = {}): Promise<Run> {
-  const child = spawn(TSX, [HOOK], {
+  const child = spawn(process.execPath, [TSX_CLI, HOOK], {
     env: {
       ...process.env,
       BROKER_MIRROR_DIR: mirrorDir,

@@ -1,6 +1,3 @@
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-
 /**
  * The instruction a hook hands the model to arm the /watch poller.
  *
@@ -14,11 +11,18 @@ import { dirname, join } from 'node:path';
 
 /** This tree, derived from this file rather than configured. A hook that hard-coded
  *  a path would break the moment the plugin were installed somewhere else, and a
- *  plugin copy would happily point back at the checkout it was copied from. */
-const root = (): string => join(dirname(fileURLToPath(import.meta.url)), '..');
+ *  plugin copy would happily point back at the checkout it was copied from.
+ *
+ *  Built from the file:// URL's own pathname, not fileURLToPath()+node:path
+ *  join(): the result goes into a command Claude Code's Monitor tool runs
+ *  through Git Bash even on Windows, so it must always read as a POSIX path
+ *  (leading `/`, forward slashes) -- fileURLToPath()/path.join() give OS-native
+ *  paths instead, which on Windows means a driveless leading segment and
+ *  backslashes Git Bash won't resolve the same way. */
+const root = (): string => new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 
 export const pollerCommand = (sessionId: string): string =>
-  `${join(root(), 'node_modules', '.bin', 'tsx')} ${join(root(), 'scripts', 'mirror', 'poller.ts')} ${sessionId}`;
+  `${root()}/node_modules/.bin/tsx ${root()}/scripts/mirror/poller.ts ${sessionId}`;
 
 export function armInstruction(sessionId: string): string {
   return [
