@@ -1,3 +1,7 @@
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { shellArg } from './shell-path.js';
+
 /**
  * The instruction a hook hands the model to arm the /watch poller.
  *
@@ -9,30 +13,25 @@
  * correctness hole.
  */
 
-/** A file:// URL's .pathname for a Windows path is `/C:/Users/...` -- valid
- *  URL form, but not a path Git Bash resolves: MSYS expects the drive
- *  letter lowercased and the colon dropped (`/c/Users/...`). Confirmed live
- *  (2026-07-18): the unconverted form fails a real Monitor-armed poller
- *  with "No such file or directory" every time, even though it looks like
- *  a plausible absolute path. A no-op on Linux/macOS, where .pathname
- *  never has a drive-letter prefix to begin with, so no process.platform
- *  branch is needed. */
-const toMsysPath = (pathname: string): string => pathname.replace(/^\/([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`);
-
 /** This tree, derived from this file rather than configured. A hook that hard-coded
  *  a path would break the moment the plugin were installed somewhere else, and a
  *  plugin copy would happily point back at the checkout it was copied from.
  *
- *  Built from the file:// URL's own pathname, not fileURLToPath()+node:path
- *  join(): the result goes into a command Claude Code's Monitor tool runs
- *  through Git Bash even on Windows, so it must always read as a POSIX path
- *  (leading `/`, forward slashes) -- fileURLToPath()/path.join() give OS-native
- *  paths instead, which on Windows means a driveless leading segment and
- *  backslashes Git Bash won't resolve the same way. */
-const root = (): string => toMsysPath(new URL('..', import.meta.url).pathname.replace(/\/$/, ''));
+ *  fileURLToPath(), not the URL's own .pathname: .pathname is percent-encoded,
+ *  so the default Windows install under `C:\Users\First Last` would reach the
+ *  shell as `First%20Last` and resolve to nothing. Native here; converted to the
+ *  Git Bash form by shellArg() at the command boundary below. */
+const root = (): string => fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '');
 
+/** Goes into a command Claude Code's Monitor tool runs through Git Bash even on
+ *  Windows, so each path is MSYS-form and quoted. sessionId needs neither: it is
+ *  a bare UUID read from the transcript filename. */
 export const pollerCommand = (sessionId: string): string =>
-  `${root()}/node_modules/.bin/tsx ${root()}/scripts/mirror/poller.ts ${sessionId}`;
+  [
+    shellArg(join(root(), 'node_modules', '.bin', 'tsx')),
+    shellArg(join(root(), 'scripts', 'mirror', 'poller.ts')),
+    sessionId,
+  ].join(' ');
 
 export function armInstruction(sessionId: string): string {
   return [

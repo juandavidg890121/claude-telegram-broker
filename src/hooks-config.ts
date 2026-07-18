@@ -1,13 +1,6 @@
+import { join } from 'node:path';
 import { ASK_TIMEOUT_SEC } from './asks.js';
-
-/** These commands go straight into settings.json's hook `command` field, which
- *  Claude Code runs through Git Bash on Windows too (POSIX shell, not
- *  cmd.exe/PowerShell) -- so they must always read as POSIX paths. node:path's
- *  join() gives OS-native separators instead, which on Windows means the
- *  backslash paths a Git Bash command line was never going to resolve. `root`
- *  is assumed to already be POSIX-style (see watch-arm.ts's root()), so a
- *  plain forward-slash join is enough -- no need to branch on process.platform. */
-const join = (...parts: string[]): string => parts.join('/');
+import { shellArg } from './shell-path.js';
 
 /**
  * The /watch hooks, and how to fold them into an existing settings.json.
@@ -22,14 +15,20 @@ export type HookEntry = { type: 'command'; command: string; timeout?: number };
 export type HookMatcher = { matcher?: string; hooks: HookEntry[] };
 export type HookConfig = Record<string, HookMatcher[]>;
 
-/** Absolute path to the tsx binary in this checkout. */
+/** Absolute *native* path to the tsx binary in this checkout — this is the one
+ *  setup and print-hooks hand to existsSync(), so it stays OS-native. The Git
+ *  Bash form of the same path belongs to command() below, and only there. */
 export const tsxPath = (root: string): string => join(root, 'node_modules', '.bin', 'tsx');
 
+/** `root` arrives OS-native, the way both callers derive it (fileURLToPath +
+ *  join). Each path is converted and quoted as it enters the command string,
+ *  because Claude Code runs these through Git Bash on Windows too — see
+ *  shell-path.ts for why that conversion cannot happen any earlier. */
 const command = (root: string, script: string, withEnv: boolean): string =>
   [
-    tsxPath(root),
-    withEnv ? `--env-file-if-exists=${join(root, '.env')}` : '',
-    join(root, 'scripts', 'mirror', script),
+    shellArg(tsxPath(root)),
+    withEnv ? `--env-file-if-exists=${shellArg(join(root, '.env'))}` : '',
+    shellArg(join(root, 'scripts', 'mirror', script)),
   ]
     .filter(Boolean)
     .join(' ');
