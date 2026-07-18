@@ -83,6 +83,22 @@ describe('PongStore', () => {
     assert.equal(new PongStore(file).lastPongAt('sess-1'), null);
   });
 
+  it('sees a pong written by a second instance after construction — the real stop-hook.ts shape', () => {
+    // The daemon holds one long-lived PongStore built at startup. stop-hook.ts
+    // is a separate short-lived process that constructs its own PongStore
+    // every turn and writes straight to the same file. If the daemon's
+    // instance only reads the file once (at construction), it can never see
+    // pongs written after that — which is exactly the bug this test guards.
+    const file = join(dir, 'cross-process.json');
+    const daemonSide = new PongStore(file);
+    assert.equal(daemonSide.lastPongAt('sess-1'), null);
+
+    new PongStore(file).recordPong('sess-1'); // stop-hook.ts's own instance
+
+    const at = daemonSide.lastPongAt('sess-1');
+    assert.ok(at !== null, 'the long-lived instance must see the write from the short-lived one');
+  });
+
   it('starts empty when the file does not exist yet', () => {
     const store = new PongStore(join(dir, 'does-not-exist.json'));
     assert.equal(store.lastPongAt('sess-1'), null);

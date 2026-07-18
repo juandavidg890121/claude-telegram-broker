@@ -27,37 +27,48 @@ export type PongRecord = { sessionId: string; lastPongAt: number };
  * racing on the same file.
  */
 export class PongStore {
-  private records: PongRecord[] = [];
+  constructor(private readonly file: string) {}
 
-  constructor(private readonly file: string) {
+  /** Re-read on every call, not cached — recordPong() runs in a fresh
+   *  stop-hook.ts process each turn, separate from the daemon's own
+   *  long-lived PongStore instance. Caching the array in memory (as an
+   *  earlier version of this class did) meant the daemon's instance only
+   *  ever saw whatever was on disk at its own startup: every pong written
+   *  by stop-hook.ts afterward was invisible for the rest of the daemon's
+   *  life, making every escalation check look at stale (or absent) data.
+   *  A JSON file this small costs nothing to re-read on a 30s-tick /
+   *  5-minute-floor schedule. */
+  private load(): PongRecord[] {
     try {
-      this.records = JSON.parse(readFileSync(this.file, 'utf8')) as PongRecord[];
+      return JSON.parse(readFileSync(this.file, 'utf8')) as PongRecord[];
     } catch {
       // No file yet, or corrupt — start empty, same convention as LoopStore.
+      return [];
     }
   }
 
   /** Atomic write via temp file + rename — see LoopStore.flush() in loops.ts
    *  for why a plain writeFileSync is not safe here. */
-  private flush(): void {
+  private flush(records: PongRecord[]): void {
     const tmp = `${this.file}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.records, null, 2));
+    writeFileSync(tmp, JSON.stringify(records, null, 2));
     renameSync(tmp, this.file);
   }
 
   recordPong(sessionId: string): void {
+    const records = this.load();
     const now = Date.now();
-    const existing = this.records.find((r) => r.sessionId === sessionId);
+    const existing = records.find((r) => r.sessionId === sessionId);
     if (existing) {
       existing.lastPongAt = now;
     } else {
-      this.records.push({ sessionId, lastPongAt: now });
+      records.push({ sessionId, lastPongAt: now });
     }
-    this.flush();
+    this.flush(records);
   }
 
   lastPongAt(sessionId: string): number | null {
-    return this.records.find((r) => r.sessionId === sessionId)?.lastPongAt ?? null;
+    return this.load().find((r) => r.sessionId === sessionId)?.lastPongAt ?? null;
   }
 }
 
