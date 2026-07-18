@@ -27,6 +27,9 @@ const sessions = new SessionManager({
     console.log(`  [${convo}] ${text.slice(0, 70)}`);
   },
   confirm: async () => true,
+  // Nothing here provokes a question. Declining is more honest than inventing an
+  // answer: /fork's claims are about carried history, not about being asked.
+  ask: async () => undefined,
 });
 
 const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));

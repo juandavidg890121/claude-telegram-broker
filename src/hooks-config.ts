@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { ASK_TIMEOUT_SEC } from './asks.js';
 
 /**
  * The /watch hooks, and how to fold them into an existing settings.json.
@@ -9,7 +10,7 @@ import { join } from 'node:path';
  * exists to prevent.
  */
 
-export type HookEntry = { type: 'command'; command: string };
+export type HookEntry = { type: 'command'; command: string; timeout?: number };
 export type HookMatcher = { matcher?: string; hooks: HookEntry[] };
 export type HookConfig = Record<string, HookMatcher[]>;
 
@@ -24,6 +25,17 @@ const command = (root: string, script: string, withEnv: boolean): string =>
   ]
     .filter(Boolean)
     .join(' ');
+
+/**
+ * How long Claude Code lets the AskUserQuestion hook run, in seconds.
+ *
+ * Derived from the wait itself, never written by hand. The hook blocks for
+ * ASK_TIMEOUT_SEC waiting for a tap, so a `timeout` at or below that would have
+ * Claude Code kill it a moment *before* it gives up — turning the one path that
+ * reports cleanly into a killed process, on every unanswered question. The
+ * margin covers startup and the final write.
+ */
+export const ASK_HOOK_TIMEOUT_SEC = ASK_TIMEOUT_SEC + 30;
 
 /**
  * The three hooks /watch needs, with this checkout's real paths filled in.
@@ -41,7 +53,13 @@ export function buildHookConfig(root: string): HookConfig {
     PreToolUse: [
       {
         matcher: 'AskUserQuestion',
-        hooks: [{ type: 'command', command: command(root, 'ask-user-question-notify.ts', true) }],
+        hooks: [
+          {
+            type: 'command',
+            command: command(root, 'ask-user-question-hook.ts', true),
+            timeout: ASK_HOOK_TIMEOUT_SEC,
+          },
+        ],
       },
     ],
   };

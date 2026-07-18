@@ -1,4 +1,5 @@
 import type { AskUserQuestionInput } from '@anthropic-ai/claude-agent-sdk/sdk-tools';
+import type { AskQuestion } from './asks.js';
 
 /**
  * Render an AskUserQuestion into the text a phone notification shows.
@@ -38,6 +39,66 @@ function renderOptions(options: Question['options']): string {
   const shown = labels.slice(0, MAX_OPTIONS_SHOWN);
   const rest = labels.length - shown.length;
   return `\n  ${shown.join(' / ')}${rest > 0 ? ` / +${rest} more` : ''}`;
+}
+
+/**
+ * One question as a Telegram message body.
+ *
+ * The buttons carry the labels, so this carries what a button cannot: the
+ * descriptions that make the labels mean anything, and whether more than one may
+ * be picked. summarize() above is the *notification* form — one glanceable line
+ * per question; this is the form you actually answer.
+ */
+export function renderQuestion(question: AskQuestion, index: number, total: number): string {
+  const counter = total > 1 ? ` (${index + 1}/${total})` : '';
+  const header = question.header ? `[${question.header}] ` : '';
+  const lines = question.options.map(
+    (option) => `• ${option.label}${option.description ? ` — ${option.description}` : ''}`,
+  );
+  const multi = question.multiSelect ? '\n\nPick any, then press Done.' : '';
+  return `❓${counter} ${header}${question.question}\n\n${lines.join('\n')}${multi}`;
+}
+
+/** Telegram caps callback_data at 64 bytes, so this carries indices, never labels. */
+export function askCallbackData(id: string, questionIndex: number, choice: number | 'done'): string {
+  return `ask:${id}:${questionIndex}:${choice}`;
+}
+
+export type AskCallback = { id: string; questionIndex: number; choice: number | 'done' };
+
+/** The inverse. Undefined for anything that is not one of ours, or is malformed. */
+export function parseAskCallback(data: string): AskCallback | undefined {
+  const [kind, id, question, choice] = data.split(':');
+  if (kind !== 'ask' || !id || question === undefined || choice === undefined) return undefined;
+
+  const questionIndex = Number(question);
+  if (!Number.isInteger(questionIndex) || questionIndex < 0) return undefined;
+  if (choice === 'done') return { id, questionIndex, choice: 'done' };
+
+  const optionIndex = Number(choice);
+  if (!Number.isInteger(optionIndex) || optionIndex < 0) return undefined;
+  return { id, questionIndex, choice: optionIndex };
+}
+
+/**
+ * Answers in the shape the tool consumes: keyed by question *text*, one string
+ * per question, several picks joined.
+ *
+ * Keyed by text because that is the harness's contract, not a preference — it
+ * looks the answer up by question string, and an index-keyed payload is silently
+ * ignored, which is indistinguishable from never having answered.
+ *
+ * The join is a guess the payload cannot settle: `answers` is typed as a map of
+ * strings, so a multi-select has to flatten into one, and comma-and-space is how
+ * a list of labels reads back most naturally.
+ */
+export function toAnswers(questions: AskQuestion[], picked: Map<number, string[]>): Record<string, string> {
+  const answers: Record<string, string> = {};
+  for (const [index, labels] of picked) {
+    const question = questions[index];
+    if (question && labels.length > 0) answers[question.question] = labels.join(', ');
+  }
+  return answers;
 }
 
 export function summarize(input: Partial<AskUserQuestionInput> | undefined): string {

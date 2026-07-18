@@ -14,6 +14,7 @@ import { Registry } from './registry.js';
 import { PERMISSION_MODES, SessionManager } from './sessions.js';
 import { TelegramFrontend } from './telegram.js';
 import { heartbeatFresh, writeInboxMessage } from './mirror.js';
+import { startAskWatcher } from './asks.js';
 import { renderPreview } from './preview.js';
 import { LoopComplaints, LoopStore, formatDuration, parseDuration, startLoopScheduler, type Loop } from './loops.js';
 import type { Frontend, Inbound } from './frontend.js';
@@ -26,7 +27,37 @@ const sessions = new SessionManager({
   registry,
   emit: (conversationId, text) => frontend.sendText(conversationId, text),
   confirm: (conversationId, ask) => frontend.askPermission(conversationId, ask),
+  ask: (conversationId, ask) => frontend.askQuestions(conversationId, ask),
 });
+
+/**
+ * AskUserQuestion in a *watched* session. The broker-owned path needs none of
+ * this — there the question arrives on canUseTool, in this process.
+ *
+ * The hook that raised it is blocked on the answer file right now, holding that
+ * session's turn open, so anything slow or throwing here costs someone real
+ * time. askQuestions already resolves undefined rather than throwing when the
+ * deadline passes, which is what keeps that promise bounded.
+ */
+const askWatcher = startAskWatcher(
+  () => registry.list().flatMap((entry) => (entry.watch && entry.sessionId ? [entry.sessionId] : [])),
+  async (request) => {
+    const entry = registry.list().find((e) => e.sessionId === request.sessionId && e.watch);
+    if (!entry) return undefined; // Unwatched between the hook writing and now.
+
+    return frontend.askQuestions(entry.conversationId, {
+      id: request.id,
+      questions: request.questions,
+      // Which session, because a watched topic's questions come from a window
+      // you are not looking at — unlike an owned session, where the only thing
+      // that could be asking is the conversation you are already reading.
+      note: `❓ ${entry.title} (${request.sessionId.slice(0, 8)}) is asking:`,
+      // The hook's deadline, not one of our own. It is the side that actually
+      // gives up, and buttons that outlive it are buttons that do nothing.
+      expiresAt: request.expiresAt,
+    });
+  },
+);
 
 frontend.onCommand('help', async (msg) => {
   await frontend.sendText(
@@ -677,6 +708,10 @@ async function shutdown(): Promise<void> {
   // Before stopAll: a tick landing mid-shutdown would push a prompt into a
   // session being torn down.
   clearInterval(loopScheduler);
+  // Same reason, plus one of its own: the heartbeat stops here, so a hook that
+  // asks during shutdown sees a dead broker and falls through to its session
+  // immediately rather than waiting out a deadline nobody is left to meet.
+  clearInterval(askWatcher);
   await sessions.stopAll();
   await frontend.stop();
   process.exit(0);

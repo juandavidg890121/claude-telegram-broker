@@ -6,7 +6,8 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { AsyncQueue } from './queue.js';
 import type { Registry, Entry } from './registry.js';
-import type { PermissionAsk } from './frontend.js';
+import type { PermissionAsk, QuestionAsk } from './frontend.js';
+import { type AskAnswers, type AskQuestion, newAskId } from './asks.js';
 import { config } from './config.js';
 
 type Live = {
@@ -22,6 +23,8 @@ export type SessionDeps = {
   emit(conversationId: string, text: string): Promise<void>;
   /** Ask the human. Resolving `false` denies the tool call. */
   confirm(conversationId: string, ask: PermissionAsk): Promise<boolean>;
+  /** Put an AskUserQuestion to the human. Resolves undefined if nobody answered. */
+  ask(conversationId: string, ask: QuestionAsk): Promise<AskAnswers | undefined>;
 };
 
 /**
@@ -29,6 +32,9 @@ export type SessionDeps = {
  * an AsyncQueue of user messages, so a session keeps its context across turns
  * instead of restarting per message.
  */
+/** Not a permission gate but the channel a question is answered through — see spawn(). */
+const ASK_USER_QUESTION = 'AskUserQuestion';
+
 export const PERMISSION_MODES: PermissionMode[] = [
   'default',
   'acceptEdits',
@@ -136,9 +142,18 @@ export class SessionManager {
         permissionMode: (entry.permissionMode as PermissionMode) ?? config.permissionMode,
         // Without these rules `canUseTool` is never called for Bash/Edit — the
         // permission flow only prompts when a rule says it must.
-        settings: { permissions: { ask: config.askTools } },
+        //
+        // AskUserQuestion is appended rather than left to BROKER_ASK_TOOLS, and
+        // it is not there as a permission gate: canUseTool is the only place the
+        // broker can see the question at all, and the tool is only offered to
+        // the model when a canUseTool handler exists. Leaving it to the env var
+        // would mean a default install where Claude asks a question no one on
+        // the phone can see, let alone answer.
+        settings: { permissions: { ask: [...new Set([...config.askTools, ASK_USER_QUESTION])] } },
         resume: entry.sessionId,
         canUseTool: async (toolName, toolInput) => {
+          if (toolName === ASK_USER_QUESTION) return this.answerQuestion(conversationId, toolInput);
+
           const allowed = await this.deps.confirm(conversationId, {
             toolName,
             preview: preview(toolInput),
@@ -154,6 +169,43 @@ export class SessionManager {
     session.pump = this.consume(session);
     this.live.set(conversationId, session);
     return session;
+  }
+
+  /**
+   * Answer an in-flight AskUserQuestion from Telegram.
+   *
+   * Allowing the call with `answers` filled in is what makes this a real answer
+   * rather than a relayed note: the tool then resolves with the harness's own
+   * "Your questions have been answered" result and the turn carries on as if you
+   * had picked in the terminal. Denying — the obvious alternative — reaches the
+   * model as a refusal, which it reasonably reads as "do not proceed".
+   *
+   * Nobody answering is not an error. Say so plainly and let Claude decide what
+   * to do without a choice it was never given; blocking the turn forever is the
+   * one outcome that helps no one.
+   */
+  private async answerQuestion(
+    conversationId: string,
+    toolInput: Record<string, unknown>,
+  ): Promise<{ behavior: 'allow'; updatedInput: Record<string, unknown> } | { behavior: 'deny'; message: string }> {
+    const questions = (toolInput.questions ?? []) as AskQuestion[];
+    const answers = Array.isArray(questions)
+      ? await this.deps.ask(conversationId, {
+          id: newAskId(),
+          questions,
+          expiresAt: Date.now() + config.askTimeoutMs,
+        })
+      : undefined;
+
+    if (!answers) {
+      return {
+        behavior: 'deny',
+        message:
+          'Nobody answered from Telegram in time. Do not ask again — carry on with your ' +
+          'best judgement, and say which assumption you made.',
+      };
+    }
+    return { behavior: 'allow', updatedInput: { ...toolInput, answers } };
   }
 
   /** Drain the SDK's message stream and forward what a human wants to see. */

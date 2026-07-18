@@ -11,7 +11,14 @@
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { summarize } from '../src/ask-user-question.js';
+import {
+  askCallbackData,
+  parseAskCallback,
+  renderQuestion,
+  summarize,
+  toAnswers,
+} from '../src/ask-user-question.js';
+import type { AskQuestion } from '../src/asks.js';
 
 const option = (label: string) => ({ label, description: `pick ${label}` });
 
@@ -102,5 +109,115 @@ describe('summarize', () => {
   it('names a question it cannot read rather than printing undefined', () => {
     const text = summarize({ questions: [{ header: 'Library' } as never] });
     assert.equal(text, '• [Library] (untitled)');
+  });
+});
+
+/**
+ * The answering half: what a question looks like when it has buttons, how a tap
+ * survives the 64-byte round trip through callback_data, and what the tool is
+ * finally handed.
+ */
+const question = (over: Partial<AskQuestion> = {}): AskQuestion => ({
+  question: 'Which library?',
+  header: 'Library',
+  options: [option('React'), option('Vue')],
+  ...over,
+});
+
+describe('renderQuestion', () => {
+  it('carries the descriptions the buttons cannot', () => {
+    // The buttons show labels only, so a body without descriptions makes you
+    // choose between two words with no idea what either means.
+    const text = renderQuestion(question(), 0, 1);
+    assert.equal(text, '❓ [Library] Which library?\n\n• React — pick React\n• Vue — pick Vue');
+  });
+
+  it('numbers itself only when there is more than one question', () => {
+    assert.match(renderQuestion(question(), 0, 2), /^❓ \(1\/2\)/);
+    assert.doesNotMatch(renderQuestion(question(), 0, 1), /\(1\/1\)/);
+  });
+
+  it('says how to finish a multi-select, which is not otherwise discoverable', () => {
+    assert.match(renderQuestion(question({ multiSelect: true }), 0, 1), /Pick any, then press Done\./);
+  });
+
+  it('omits an absent header rather than printing empty brackets', () => {
+    assert.match(renderQuestion(question({ header: undefined }), 0, 1), /^❓ Which library\?/);
+  });
+});
+
+describe('ask callback data', () => {
+  it('round-trips an option tap', () => {
+    assert.deepEqual(parseAskCallback(askCallbackData('abc123', 2, 3)), {
+      id: 'abc123',
+      questionIndex: 2,
+      choice: 3,
+    });
+  });
+
+  it('round-trips Done', () => {
+    assert.deepEqual(parseAskCallback(askCallbackData('abc123', 0, 'done')), {
+      id: 'abc123',
+      questionIndex: 0,
+      choice: 'done',
+    });
+  });
+
+  it('fits Telegram’s 64-byte callback_data cap at the worst case', () => {
+    // Ids are 12 hex characters and AskUserQuestion allows at most four
+    // questions of four options. Labels are deliberately not in here; one long
+    // enough would push a real tap over the cap and Telegram rejects the
+    // *message*, so the question would never appear at all.
+    const worst = askCallbackData('a'.repeat(12), 3, 3);
+    assert.ok(Buffer.byteLength(worst) <= 64, `${worst} is ${Buffer.byteLength(worst)} bytes`);
+  });
+
+  it('ignores callbacks that are not ours', () => {
+    // perm: shares the same callback stream and must still reach its own handler.
+    assert.equal(parseAskCallback('perm:abc123:allow'), undefined);
+    assert.equal(parseAskCallback('nonsense'), undefined);
+  });
+
+  it('rejects a malformed one rather than answering the wrong question', () => {
+    assert.equal(parseAskCallback('ask:abc:notanumber:1'), undefined);
+    assert.equal(parseAskCallback('ask:abc:0:notanumber'), undefined);
+    assert.equal(parseAskCallback('ask:abc:-1:0'), undefined);
+    assert.equal(parseAskCallback('ask::0:0'), undefined);
+    assert.equal(parseAskCallback('ask:abc:0'), undefined);
+  });
+});
+
+describe('toAnswers', () => {
+  const questions = [question(), question({ question: 'Which approach?', header: 'Approach' })];
+
+  it('keys by question text, which is what the tool looks answers up by', () => {
+    // Keyed by index, the payload is silently ignored and the result is
+    // indistinguishable from never having answered at all.
+    const answers = toAnswers(questions, new Map([[0, ['React']]]));
+    assert.deepEqual(answers, { 'Which library?': 'React' });
+  });
+
+  it('joins a multi-select into the single string the field holds', () => {
+    const answers = toAnswers(questions, new Map([[0, ['React', 'Vue']]]));
+    assert.deepEqual(answers, { 'Which library?': 'React, Vue' });
+  });
+
+  it('answers every question that was picked', () => {
+    const answers = toAnswers(
+      questions,
+      new Map([
+        [0, ['React']],
+        [1, ['Rewrite']],
+      ]),
+    );
+    assert.deepEqual(answers, { 'Which library?': 'React', 'Which approach?': 'Rewrite' });
+  });
+
+  it('leaves out a question with nothing picked', () => {
+    assert.deepEqual(toAnswers(questions, new Map([[0, []]])), {});
+  });
+
+  it('ignores an index with no question behind it', () => {
+    assert.deepEqual(toAnswers(questions, new Map([[9, ['React']]])), {});
   });
 });
