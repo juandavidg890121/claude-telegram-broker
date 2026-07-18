@@ -48,10 +48,26 @@ const watcher = startAskWatcher(
   100,
 );
 
+// node_modules/.bin/tsx has no extension -- Windows only gets tsx.CMD/tsx.ps1
+// there, and the Agent SDK's own hook execution does not resolve that the way
+// Claude Code CLI's settings.json-driven hooks happen to (confirmed live: this
+// exact bare path is what Claude Code itself successfully runs for the real
+// Stop hook, but the SDK's PreToolUse hook here silently never fired with it --
+// "the question never left the session"). Going straight at tsx's own CLI
+// entrypoint through the current Node binary sidesteps that ambiguity
+// entirely, the same fix already applied to test/ask-hook.test.ts.
+// Quoted: process.execPath is "C:\Program Files\nodejs\node.exe" on a default
+// Windows install -- an unquoted space there splits into two bogus arguments
+// the moment this array becomes a single command-line string (confirmed live:
+// the unquoted version still never reached the broker, even after fixing the
+// missing-extension problem above).
 const hookCommand = [
-  join(root, 'node_modules', '.bin', 'tsx'),
+  process.execPath,
+  join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
   join(root, 'scripts', 'mirror', 'ask-user-question-hook.ts'),
-].join(' ');
+]
+  .map((part) => `"${part}"`)
+  .join(' ');
 
 const session = query({
   prompt:
