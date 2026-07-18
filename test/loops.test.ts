@@ -211,6 +211,24 @@ describe('LoopComplaints', () => {
     assert.equal(complaints.shouldReport('b2', 'not-listening'), true, 'a different loop has its own say');
   });
 
+  it('mutes a quota outage the same way', () => {
+    // A 30m loop against a 5-hour window would otherwise post the same refusal
+    // ten times, each with a countdown one interval shorter than the last.
+    const complaints = new LoopComplaints();
+    assert.equal(complaints.shouldReport('a1', 'no-quota'), true);
+    assert.equal(complaints.shouldReport('a1', 'no-quota'), false);
+  });
+
+  it('speaks up when the reason changes, without waiting for a delivery', () => {
+    // Muting on "it already complained" rather than on *what* it complained
+    // about would let a loop switch failure mode in silence — you would still be
+    // waiting on the quota to come back, and it would be listening you lacked.
+    const complaints = new LoopComplaints();
+    assert.equal(complaints.shouldReport('a1', 'no-quota'), true);
+    assert.equal(complaints.shouldReport('a1', 'not-listening'), true, 'a different outage is different news');
+    assert.equal(complaints.shouldReport('a1', 'not-listening'), false);
+  });
+
   it('forgets a cancelled loop, so a reused id does not inherit its silence', () => {
     const complaints = new LoopComplaints();
     complaints.shouldReport('a1', 'not-listening');

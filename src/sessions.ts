@@ -25,6 +25,8 @@ export type SessionDeps = {
   confirm(conversationId: string, ask: PermissionAsk): Promise<boolean>;
   /** Put an AskUserQuestion to the human. Resolves undefined if nobody answered. */
   ask(conversationId: string, ask: QuestionAsk): Promise<AskAnswers | undefined>;
+  /** A turn just finished. Optional, best-effort, and never allowed to throw. */
+  turnEnded?(conversationId: string): Promise<void>;
 };
 
 /**
@@ -235,6 +237,10 @@ export class SessionManager {
           if (message.subtype !== 'success') {
             await this.deps.emit(conversationId, `⚠️ Session ended: ${message.subtype}`);
           }
+          // Swallowed on purpose: a decoration that throws here escapes into
+          // consume's catch, which reports it as a session error and kills the
+          // pump. The session must outlive anything the quota check does.
+          await Promise.resolve(this.deps.turnEnded?.(conversationId)).catch(() => {});
         }
       }
     } catch (error) {
