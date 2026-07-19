@@ -16,7 +16,7 @@ import { TelegramFrontend } from './telegram.js';
 import { heartbeatFresh, writeInboxMessage } from './mirror.js';
 import { startAskWatcher } from './asks.js';
 import { renderPreview } from './preview.js';
-import { blockedMessage, checkAlert, checkBlocked, type QuotaWindow } from './quota.js';
+import { checkAlert } from './quota.js';
 import { LoopComplaints, LoopStore, formatDuration, parseDuration, startLoopScheduler, type Loop } from './loops.js';
 import {
   HeartbeatStore,
@@ -563,10 +563,10 @@ frontend.onCommand('stop', async (msg) => {
 
 /** Whether a prompt reached the session, and if not, why — the caller decides
  *  what that is worth saying, because the answer differs for a person who just
- *  typed and a timer that fired. `no-quota` carries the window it read, because
- *  that reading is gone by the time the caller reacts and asking again would
- *  answer about a different minute. */
-type Delivery = { status: 'delivered' | 'not-listening' } | { status: 'no-quota'; window: QuotaWindow };
+ *  typed and a timer that fired. No 'no-quota' variant (removed 2026-07-19):
+ *  quota is never predicted here, only ever discovered for real, downstream,
+ *  by whatever actually tries to run the turn. */
+type Delivery = { status: 'delivered' | 'not-listening' };
 
 /**
  * Deliver text into a conversation exactly as if the user had typed it —
@@ -580,16 +580,17 @@ type Delivery = { status: 'delivered' | 'not-listening' } | { status: 'no-quota'
  * forever, to a topic whose session had simply been closed.
  */
 async function deliverMessage(conversationId: string, text: string): Promise<Delivery> {
-  // Checked before delivering, not after: text pushed into a session with no
-  // quota left is answered by nothing at all — the turn dies wherever it dies
-  // and the topic simply stays quiet. Refusing here is the difference between
-  // "the broker is broken" and "you are out of quota until 4:10 PM".
-  //
-  // Above the watch split because both sides spend the same quota: a watched
-  // session runs in someone's VS Code, but it bills to the same account.
-  const blocked = await checkBlocked();
-  if (blocked) return { status: 'no-quota', window: blocked };
-
+  // 2026-07-19, user-directed removal of the old predictive quota gate that
+  // used to sit here: refusing a message because a *reading* said the window
+  // was near/at its limit is a guess, not a fact — the reading can be stale,
+  // wrong, or simply not reflect an account that was switched since the last
+  // check (exactly what happened live: real messages got refused with "out
+  // of quota" while the user had quota available). Every message is now
+  // always attempted. For a watched session this was always the honest
+  // choice anyway — writeInboxMessage below is a file write, not an API
+  // call; the real quota determination happens later, for real, when Claude
+  // Code itself processes the turn — a predictive check here could only ever
+  // be wrong in the refusing direction, never in the allowing one.
   const entry =
     registry.get(conversationId) ?? sessions.register(conversationId, config.defaultCwd, 'default');
 
@@ -611,13 +612,6 @@ async function deliverMessage(conversationId: string, text: string): Promise<Del
 frontend.onMessage(async (msg: Inbound) => {
   const outcome = await deliverMessage(msg.conversationId, msg.text);
   if (outcome.status === 'delivered') return;
-
-  // Every fire, unlike the loop below: a person who just typed is owed an answer
-  // to the message they typed, and "you are out of quota" is that answer.
-  if (outcome.status === 'no-quota') {
-    await frontend.sendText(msg.conversationId, blockedMessage(outcome.window, 'Your message was not sent.'));
-    return;
-  }
 
   const entry = registry.get(msg.conversationId);
   // Name all three ways back. The commonest cause is a closed VS Code window —
@@ -674,7 +668,7 @@ async function deliverLoop(loop: Loop): Promise<void> {
   const prompt = missed > 0
     ? `[Note: ${missed} scheduled fire${missed > 1 ? 's' : ''} of this loop were missed since ` +
       `${new Date(loop.missedSince!).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })} ` +
-      `(quota exhausted or session unavailable). There may be a backlog of pending work — ` +
+      `(session unavailable). There may be a backlog of pending work — ` +
       `consider catching up on anything accumulated in that gap.]\n\n${loop.prompt}`
     : loop.prompt;
 
@@ -694,20 +688,9 @@ async function deliverLoop(loop: Loop): Promise<void> {
 
   if (!complaints.shouldReport(loop.id, outcome.status)) return;
 
-  // Muted after the first one, like the not-listening case and for the same
-  // reason: a 30m loop against a 5-hour window would otherwise post the same
-  // refusal ten times, each with a countdown one interval shorter than the last.
-  // The loop is not broken and needs no action, so it says so once.
-  if (outcome.status === 'no-quota') {
-    await frontend.sendText(
-      loop.conversationId,
-      `${blockedMessage(outcome.window, `Loop ${loop.id} couldn't fire.`)}\n` +
-        `It keeps trying every ${formatDuration(loop.intervalMs)} and will say nothing more until it lands; ` +
-        `/unloop ${loop.id} to stop it.`,
-    );
-    return;
-  }
-
+  // Muted after the first one: a 30m loop against a closed session would
+  // otherwise post the same refusal every fire, forever. The loop is not
+  // broken and needs no action, so it says so once.
   await frontend.sendText(
     loop.conversationId,
     `🔁 Loop ${loop.id} couldn't fire — nothing is listening in this watched session. ` +
@@ -745,10 +728,10 @@ async function deliverHeartbeat(hb: Heartbeat): Promise<void> {
   const prompt = escalate ? HEARTBEAT_ESCALATED_PROMPT : HEARTBEAT_PING_PROMPT;
   const outcome = await deliverMessage(hb.conversationId, prompt);
   // Only a real delivery counts as "pinged" -- marking it on a blocked
-  // outcome (no-quota / not-listening) recorded a phantom lastPingAt with no
-  // prompt ever reaching the session, so the next real ping after the block
-  // clears compared pongs against a timestamp nothing could have answered,
-  // forcing a false HEARTBEAT_ESCALATED_PROMPT the first time it fired again.
+  // outcome (not-listening) recorded a phantom lastPingAt with no prompt
+  // ever reaching the session, so the next real ping after the block clears
+  // compared pongs against a timestamp nothing could have answered, forcing
+  // a false HEARTBEAT_ESCALATED_PROMPT the first time it fired again.
   if (outcome.status === 'delivered') {
     heartbeats.markPinged(hb.conversationId, escalate);
   }
@@ -759,20 +742,10 @@ async function deliverHeartbeat(hb: Heartbeat): Promise<void> {
   // unlike a loop). The escalated PROMPT ITSELF (sent to Claude, inside the
   // session) is unrelated to this — this block is only about telling the
   // Telegram user the ping couldn't even be delivered at all (session not
-  // listening / no quota), which needs the same "say it once" treatment a
-  // loop's delivery failure gets.
+  // listening), which needs the same "say it once" treatment a loop's
+  // delivery failure gets.
   if (outcome.status === 'delivered') return;
   if (!complaints.shouldReport(`heartbeat:${hb.conversationId}`, outcome.status)) return;
-
-  if (outcome.status === 'no-quota') {
-    await frontend.sendText(
-      hb.conversationId,
-      `${blockedMessage(outcome.window, `Heartbeat couldn't ping.`)}\n` +
-        `It keeps trying every ${formatDuration(hb.intervalMs)} and will say nothing more until it lands; ` +
-        `/unheartbeat to stop it.`,
-    );
-    return;
-  }
 
   await frontend.sendText(
     hb.conversationId,
