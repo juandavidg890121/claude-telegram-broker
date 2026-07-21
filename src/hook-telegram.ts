@@ -14,12 +14,9 @@ import { chunkify } from './chunk.js';
  * next fix to `send` lands in one of them and not the others.
  */
 
-/** Read a hook's JSON payload from stdin. */
-export async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-  return Buffer.concat(chunks).toString('utf8');
-}
+/** Re-exported so the hooks keep importing their payload read from here, and
+ *  session-start-hook can have the same one without the Telegram path. */
+export { readStdin } from './hook-stdin.js';
 
 /**
  * Split a conversation id into where a message goes.

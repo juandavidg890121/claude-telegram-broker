@@ -14,13 +14,8 @@
  *     "<repo>/node_modules/.bin/tsx <repo>/scripts/mirror/session-start-hook.ts" }] }]
  */
 import { findWatched } from '../../src/broker-state.js';
+import { readStdin } from '../../src/hook-stdin.js';
 import { armInstruction } from '../../src/watch-arm.js';
-
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-  return Buffer.concat(chunks).toString('utf8');
-}
 
 const payload = JSON.parse(await readStdin()) as { session_id?: string };
 const sessionId = payload.session_id;
