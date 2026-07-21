@@ -5,7 +5,7 @@
   "scripts": {
     "configure": "tsx scripts/setup.ts",
     "start": "tsx --env-file-if-exists=.env src/index.ts",
-    "print-hooks": "tsx scripts/mirror/print-hooks.ts",
+    "print-hooks": "tsx --env-file-if-exists=.env scripts/mirror/print-hooks.ts",
     "smoke": "tsx --env-file-if-exists=.env src/smoke.ts",
     "smoke:fork": "tsx --env-file-if-exists=.env src/smoke-fork.ts",
     "smoke:watch": "tsx --env-file-if-exists=.env src/smoke-watch.ts",
