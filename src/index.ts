@@ -16,7 +16,7 @@ import { TelegramFrontend } from './telegram.js';
 import { heartbeatFresh, writeInboxMessage } from './mirror.js';
 import { startAskWatcher } from './asks.js';
 import { renderPreview } from './preview.js';
-import { blockedMessage, checkAlert, checkBlocked, type QuotaWindow } from './quota.js';
+import { checkAlert } from './quota.js';
 import { LoopComplaints, LoopStore, formatDuration, parseDuration, startLoopScheduler, type Loop } from './loops.js';
 import type { Frontend, Inbound } from './frontend.js';
 
@@ -547,33 +547,26 @@ frontend.onCommand('stop', async (msg) => {
 
 /** Whether a prompt reached the session, and if not, why — the caller decides
  *  what that is worth saying, because the answer differs for a person who just
- *  typed and a timer that fired. `no-quota` carries the window it read, because
- *  that reading is gone by the time the caller reacts and asking again would
- *  answer about a different minute. */
-type Delivery = { status: 'delivered' | 'not-listening' } | { status: 'no-quota'; window: QuotaWindow };
+ *  typed and a timer that fired.
+ *
+ *  Deliberately does not check quota first. A message pushed into a session
+ *  with no quota left is answered by nothing at all — the turn dies wherever
+ *  it dies and the topic stays quiet — but that is the account's own limit
+ *  playing out, not this broker's decision to make on the user's behalf.
+ *  Refusing to even try was a worse failure than the silence it was meant to
+ *  explain: it stopped every message, not just the ones that would truly have
+ *  failed, on nothing firmer than a rounded percentage or a status string this
+ *  broker does not fully control the meaning of. checkAlert (see quota.ts)
+ *  still surfaces a warning near the limit — this just no longer acts on it. */
+type Delivery = { status: 'delivered' | 'not-listening' };
 
 /**
  * Deliver text into a conversation exactly as if the user had typed it —
  * watched-session inbox routing or driving a broker-owned session directly. The
  * single path both a real inbound Telegram message and a due /loop prompt go
  * through, so a loop is indistinguishable from having typed it yourself.
- *
- * It reports rather than announces. The refusal below used to be sent from
- * here, which was right for the only caller it had: a person who typed. When a
- * loop started calling it too, that same paragraph went out on every fire,
- * forever, to a topic whose session had simply been closed.
  */
 async function deliverMessage(conversationId: string, text: string): Promise<Delivery> {
-  // Checked before delivering, not after: text pushed into a session with no
-  // quota left is answered by nothing at all — the turn dies wherever it dies
-  // and the topic simply stays quiet. Refusing here is the difference between
-  // "the broker is broken" and "you are out of quota until 4:10 PM".
-  //
-  // Above the watch split because both sides spend the same quota: a watched
-  // session runs in someone's VS Code, but it bills to the same account.
-  const blocked = await checkBlocked();
-  if (blocked) return { status: 'no-quota', window: blocked };
-
   const entry =
     registry.get(conversationId) ?? sessions.register(conversationId, config.defaultCwd, 'default');
 
@@ -595,13 +588,6 @@ async function deliverMessage(conversationId: string, text: string): Promise<Del
 frontend.onMessage(async (msg: Inbound) => {
   const outcome = await deliverMessage(msg.conversationId, msg.text);
   if (outcome.status === 'delivered') return;
-
-  // Every fire, unlike the loop below: a person who just typed is owed an answer
-  // to the message they typed, and "you are out of quota" is that answer.
-  if (outcome.status === 'no-quota') {
-    await frontend.sendText(msg.conversationId, blockedMessage(outcome.window, 'Your message was not sent.'));
-    return;
-  }
 
   const entry = registry.get(msg.conversationId);
   // Name all three ways back. The commonest cause is a closed VS Code window —
@@ -651,20 +637,6 @@ async function deliverLoop(loop: Loop): Promise<void> {
 
   const outcome = await deliverMessage(loop.conversationId, loop.prompt);
   if (!complaints.shouldReport(loop.id, outcome.status)) return;
-
-  // Muted after the first one, like the not-listening case and for the same
-  // reason: a 30m loop against a 5-hour window would otherwise post the same
-  // refusal ten times, each with a countdown one interval shorter than the last.
-  // The loop is not broken and needs no action, so it says so once.
-  if (outcome.status === 'no-quota') {
-    await frontend.sendText(
-      loop.conversationId,
-      `${blockedMessage(outcome.window, `Loop ${loop.id} couldn't fire.`)}\n` +
-        `It keeps trying every ${formatDuration(loop.intervalMs)} and will say nothing more until it lands; ` +
-        `/unloop ${loop.id} to stop it.`,
-    );
-    return;
-  }
 
   await frontend.sendText(
     loop.conversationId,
