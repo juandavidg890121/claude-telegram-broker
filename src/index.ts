@@ -697,21 +697,13 @@ async function deliverHeartbeat(hb: Heartbeat): Promise<void> {
   // is only one heartbeat per conversation — no id to disambiguate several,
   // unlike a loop). The escalated PROMPT ITSELF (sent to Claude, inside the
   // session) is unrelated to this — this block is only about telling the
-  // Telegram user the ping couldn't even be delivered at all (session not
-  // listening / no quota), which needs the same "say it once" treatment a
-  // loop's delivery failure gets.
+  // Telegram user the ping couldn't even be delivered at all (nothing is
+  // listening in the session), which needs the same "say it once" treatment
+  // a loop's delivery failure gets. Delivery's status is only ever
+  // 'delivered' | 'not-listening' (see the type above) — quota no longer
+  // blocks delivery at all.
   if (outcome.status === 'delivered') return;
   if (!complaints.shouldReport(`heartbeat:${hb.conversationId}`, outcome.status)) return;
-
-  if (outcome.status === 'no-quota') {
-    await frontend.sendText(
-      hb.conversationId,
-      `${blockedMessage(outcome.window, `Heartbeat couldn't ping.`)}\n` +
-        `It keeps trying every ${formatDuration(hb.intervalMs)} and will say nothing more until it lands; ` +
-        `/unheartbeat to stop it.`,
-    );
-    return;
-  }
 
   await frontend.sendText(
     hb.conversationId,
