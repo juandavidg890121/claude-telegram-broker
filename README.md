@@ -424,6 +424,9 @@ works.
 | `/loops` | This conversation's loops, with when each fires next |
 | `/unloop <id>` | Cancel a loop. Ids come from `/loops` |
 | `/reloop <id> <interval> <prompt…>` | Replace a loop's interval and prompt, rescheduled from now |
+| `/heartbeat <interval>` | Periodically verify this conversation's Stop-hook mirror is actually alive — `/heartbeat 30m`. Minimum `5m` (higher than `/loop`'s, since every ping costs a real turn). One heartbeat per conversation; a second `/heartbeat` call replaces the first. See [Heartbeat: detecting a broken mirror](#heartbeat-detecting-a-broken-mirror). |
+| `/heartbeats` | This conversation's heartbeat, if any — interval, next check, and whether it's currently escalated |
+| `/unheartbeat` | Turn the heartbeat off |
 | `/mode [name]` | Show or change this session's permission mode. Persists, so it survives a restart and applies on resume. `BROKER_ASK_TOOLS` still prompts regardless — see below. (Switching *model* is Claude Code's own `/model`, below.) |
 | `/interrupt` | Stop what Claude is doing right now |
 | `/stop` | End the session process — the transcript survives and the next message resumes it |
@@ -432,6 +435,45 @@ Anything that isn't a command is sent to Claude as a message.
 
 **Photos** are downloaded and handed to Claude as a file path for its `Read`
 tool, along with any caption.
+
+## Heartbeat: detecting a broken mirror
+
+The Stop hook mirrors every reply out to Telegram — but the daemon (which owns
+`/loop`, `/watch`, and all inbound traffic) has no way to know whether any given
+mirror actually reached Telegram. `stop-hook.ts` talks to the Bot API directly
+and never touches the running daemon process; the two only share a state file
+on disk. If the mirror silently stops working — a bad path in `settings.json`,
+a dead daemon, an unset `TELEGRAM_BOT_TOKEN` — nothing tells you. The topic just
+goes quiet, indistinguishable from Claude having nothing to say.
+
+`/heartbeat <interval>` closes that gap. Once enabled, the broker periodically
+sends a plain ping into the conversation — through the same inbox path
+`/loop` prompts use, which doesn't depend on the Stop hook at all — and checks
+whether a *pong* landed since the last one. A pong isn't a special reply: it's
+recorded by `stop-hook.ts` itself, once per turn, the instant a real message
+successfully reaches Telegram. Ordinary traffic proves the channel is alive;
+the heartbeat just guarantees at least one real turn happens inside the
+interval, even during a quiet stretch where nothing else would trigger one.
+
+**If a ping goes unanswered**, the *next* scheduled ping escalates: instead of
+the quiet liveness check, it sends an urgent, explicit message asking Claude to
+investigate why the Stop hook isn't delivering (hook paths in `settings.json`,
+the daemon process, `TELEGRAM_BOT_TOKEN`) and fix it — then resume whatever it
+was doing before the ping interrupted it. Escalation repeats every interval,
+not just once, until a pong lands again — this is a message to Claude asking it
+to act, not a notice to a human that something's broken, so going quiet after
+one attempt would leave the problem unfixed and unmentioned.
+
+Fixed prompt text, not user-configurable — this is a liveness check, not a
+second `/loop`. Same skip-while-working guard as loops: a heartbeat due while
+the session is still finishing its last turn is not a communication failure
+and doesn't queue a ping behind it.
+
+Live-verified 2026-07-18: the mirror was deliberately broken (`.env` renamed
+aside, so `stop-hook.ts` finds no `TELEGRAM_BOT_TOKEN`) with a `/heartbeat 5m`
+already running. The next scheduled ping correctly detected the missing pong
+and escalated — confirmed both in the heartbeat's own state file
+(`"escalated": true`) and by the exact urgent prompt landing in the session.
 
 ## Voice notes (optional)
 
