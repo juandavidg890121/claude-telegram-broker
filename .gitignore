@@ -1,3 +1,7 @@
 node_modules
 .env
 .idea
+*.log
+broker_pid.txt
+package-lock.json
+update-broker.ps1

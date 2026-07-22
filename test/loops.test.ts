@@ -113,6 +113,69 @@ describe('LoopStore', () => {
     assert.equal(store.edit('-100:1', 'nope', 60_000, 'x'), undefined);
   });
 
+  it('a new loop starts with no missed fires', () => {
+    const store = new LoopStore(join(dir, 'miss-a.json'));
+    const loop = store.add('-100:1', 60_000, 'a');
+    assert.equal(loop.missedFires, 0);
+    assert.equal(loop.missedSince, null);
+  });
+
+  it('recordMiss increments the count and sets missedSince once', () => {
+    const store = new LoopStore(join(dir, 'miss-b.json'));
+    const loop = store.add('-100:1', 60_000, 'a');
+    store.recordMiss(loop.id);
+    const once = store.listFor('-100:1')[0];
+    assert.equal(once.missedFires, 1);
+    assert.ok(once.missedSince !== null);
+
+    const firstSince = once.missedSince;
+    store.recordMiss(loop.id);
+    const twice = store.listFor('-100:1')[0];
+    assert.equal(twice.missedFires, 2, 'each miss increments');
+    assert.equal(twice.missedSince, firstSince, 'missedSince marks the start of the streak, not the latest miss');
+  });
+
+  it('recordMiss on an unknown id does nothing, does not throw', () => {
+    const store = new LoopStore(join(dir, 'miss-c.json'));
+    store.recordMiss('nope');
+  });
+
+  it('clearMisses zeroes the count and persists', () => {
+    const store = new LoopStore(join(dir, 'miss-d.json'));
+    const loop = store.add('-100:1', 60_000, 'a');
+    store.recordMiss(loop.id);
+    store.recordMiss(loop.id);
+    store.clearMisses(loop.id);
+
+    const cleared = store.listFor('-100:1')[0];
+    assert.equal(cleared.missedFires, 0);
+    assert.equal(cleared.missedSince, null);
+
+    const reloaded = new LoopStore(join(dir, 'miss-d.json')).listFor('-100:1')[0];
+    assert.equal(reloaded.missedFires, 0, 'clearing persists across instances');
+  });
+
+  it('edit resets missed-fire history — a new prompt does not inherit the old one\'s backlog', () => {
+    const store = new LoopStore(join(dir, 'miss-e.json'));
+    const loop = store.add('-100:1', 60_000, 'a');
+    store.recordMiss(loop.id);
+    store.edit('-100:1', loop.id, 60_000, 'b');
+
+    const edited = store.listFor('-100:1')[0];
+    assert.equal(edited.missedFires, 0);
+    assert.equal(edited.missedSince, null);
+  });
+
+  it('loads a legacy file with no missedFires/missedSince fields as 0/null', () => {
+    const file = join(dir, 'legacy.json');
+    writeFileSync(file, JSON.stringify([
+      { id: 'abc', conversationId: '-100:1', intervalMs: 60_000, prompt: 'a', nextFireAt: Date.now(), createdAt: Date.now() },
+    ]));
+    const loop = new LoopStore(file).listFor('-100:1')[0];
+    assert.equal(loop.missedFires, 0);
+    assert.equal(loop.missedSince, null);
+  });
+
   it('takeDue returns only loops whose time has come, and reschedules them', () => {
     const store = new LoopStore(join(dir, 'f.json'));
     const loop = store.add('-100:1', 60_000, 'due-soon');
