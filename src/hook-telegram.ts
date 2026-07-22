@@ -40,18 +40,43 @@ export function target(conversationId: string): { chatId: string; threadId?: num
  */
 const apiBase = (): string => process.env.TELEGRAM_API_BASE ?? 'https://api.telegram.org';
 
-/** Raw sendMessage. Throws on a non-2xx so the caller can decide what that means. */
+/**
+ * Raw sendMessage. Throws on a non-2xx so the caller can decide what that
+ * means.
+ *
+ * One retry after a short delay, but only for failures that are plausibly
+ * momentary: a network-level throw (DNS hiccup, connection reset) or a 5xx
+ * (Telegram's own outage). A 4xx means Telegram understood the request and
+ * rejected it outright (bad token, unknown chat) -- retrying sends the exact
+ * same rejection again, so that fails immediately instead.
+ */
 export async function send(
   token: string,
   chatId: string,
   threadId: number | undefined,
   text: string,
 ): Promise<void> {
-  const response = await fetch(`${apiBase()}/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, message_thread_id: threadId }),
-  });
+  const body = JSON.stringify({ chat_id: chatId, text, message_thread_id: threadId });
+  const attempt = (): Promise<Response> =>
+    fetch(`${apiBase()}/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+  const wait = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 500));
+
+  let response: Response;
+  try {
+    response = await attempt();
+  } catch {
+    await wait();
+    response = await attempt();
+  }
+
+  if (!response.ok && response.status >= 500) {
+    await wait();
+    response = await attempt();
+  }
   if (!response.ok) throw new Error(`sendMessage ${response.status}: ${await response.text()}`);
 }
 
