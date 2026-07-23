@@ -26,5 +26,10 @@
   },
   "type": "module",
   "private": true,
-  "packageManager": "pnpm@10.7.1"
+  "packageManager": "pnpm@10.7.1",
+  "pnpm": {
+    "overrides": {
+      "fast-uri": ">=3.1.4"
+    }
+  }
 }
