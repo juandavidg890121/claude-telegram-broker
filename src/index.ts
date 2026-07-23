@@ -683,14 +683,21 @@ async function deliverHeartbeat(hb: Heartbeat): Promise<void> {
   const sessionId = entry?.sessionId;
 
   let escalate = false;
+  let missedPings = 0;
   if (hb.lastPingAt !== null && sessionId) {
     const lastPong = pongs.lastPongAt(sessionId);
-    escalate = lastPong === null || lastPong <= hb.lastPingAt;
+    const pongStale = lastPong === null || lastPong <= hb.lastPingAt;
+    // Tolerate a single missed pong: a long working turn legitimately spans one
+    // ping interval without ending a turn, so no fresh pong lands even though
+    // the channel is fine. Escalate only on 2+ CONSECUTIVE misses — genuinely
+    // unanswered, not just mid-task. Any fresh pong resets the counter to 0.
+    missedPings = pongStale ? (hb.missedPings ?? 0) + 1 : 0;
+    escalate = missedPings >= 2;
   }
 
   const prompt = escalate ? HEARTBEAT_ESCALATED_PROMPT : HEARTBEAT_PING_PROMPT;
   const outcome = await deliverMessage(hb.conversationId, prompt);
-  heartbeats.markPinged(hb.conversationId, escalate);
+  heartbeats.markPinged(hb.conversationId, escalate, missedPings);
 
   // Delivery-failure reporting mirrors deliverLoop exactly (report once via
   // the shared LoopComplaints instance, keyed by conversationId since there
