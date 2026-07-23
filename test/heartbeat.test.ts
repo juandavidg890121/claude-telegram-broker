@@ -47,6 +47,28 @@ describe('PongStore', () => {
     assert.ok(reloaded.lastPongAt('sess-1') !== null);
   });
 
+  it('an existing instance sees a pong written later by a different instance, without being reconstructed', () => {
+    // The real-world shape of the bug this guards: the daemon constructs
+    // exactly one PongStore at startup (index.ts's module-level `pongs`) and
+    // keeps it for the process's entire lifetime, while stop-hook.ts writes
+    // through a fresh instance every turn. Before this fix, lastPongAt()
+    // read from an in-memory array captured once in the constructor, so the
+    // daemon's long-lived instance never saw ANY pong recorded after its own
+    // startup — every heartbeat escalation fired regardless of real,
+    // successfully-recorded pongs, because the long-lived reader was
+    // checking a frozen snapshot, not the file.
+    const file = join(dir, 'cross-instance.json');
+    const longLived = new PongStore(file);
+    assert.equal(longLived.lastPongAt('sess-1'), null, 'nothing recorded yet');
+
+    new PongStore(file).recordPong('sess-1'); // a separate, short-lived writer
+
+    assert.ok(
+      longLived.lastPongAt('sess-1') !== null,
+      'the pre-existing instance must see the write without being reconstructed',
+    );
+  });
+
   it('keeps sessions apart', () => {
     const store = new PongStore(join(dir, 'd.json'));
     store.recordPong('sess-1');

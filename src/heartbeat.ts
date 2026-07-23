@@ -27,37 +27,53 @@ export type PongRecord = { sessionId: string; lastPongAt: number };
  * racing on the same file.
  */
 export class PongStore {
-  private records: PongRecord[] = [];
+  constructor(private readonly file: string) {}
 
-  constructor(private readonly file: string) {
+  /** Always re-read from disk: the two writers/readers documented on this
+   * class above are DIFFERENT PROCESSES on different lifetimes. A one-shot
+   * stop-hook.ts instance reading-then-writing is fine either way, but the
+   * long-lived daemon constructs exactly one PongStore at startup and keeps
+   * it for the process's entire lifetime (see index.ts's module-level
+   * `const pongs = new PongStore(...)`) -- loading records once in the
+   * constructor meant that instance's view of "has a pong arrived" froze at
+   * whatever the file held at daemon startup and never saw a single write
+   * stop-hook.ts made afterward. Confirmed live 2026-07-23: every heartbeat
+   * escalation this session fired regardless of real, successfully-recorded
+   * pongs on disk, because the daemon was checking a stale in-memory copy,
+   * not the file. Re-reading here (a few-hundred-byte JSON file, read at
+   * most once per turn or once per 30s scheduler tick) costs nothing.
+   */
+  private read(): PongRecord[] {
     try {
-      this.records = JSON.parse(readFileSync(this.file, 'utf8')) as PongRecord[];
+      return JSON.parse(readFileSync(this.file, 'utf8')) as PongRecord[];
     } catch {
-      // No file yet, or corrupt — start empty, same convention as LoopStore.
+      // No file yet, or corrupt — same convention as LoopStore.
+      return [];
     }
   }
 
   /** Atomic write via temp file + rename — see LoopStore.flush() in loops.ts
    *  for why a plain writeFileSync is not safe here. */
-  private flush(): void {
+  private flush(records: PongRecord[]): void {
     const tmp = `${this.file}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.records, null, 2));
+    writeFileSync(tmp, JSON.stringify(records, null, 2));
     renameSync(tmp, this.file);
   }
 
   recordPong(sessionId: string): void {
     const now = Date.now();
-    const existing = this.records.find((r) => r.sessionId === sessionId);
+    const records = this.read();
+    const existing = records.find((r) => r.sessionId === sessionId);
     if (existing) {
       existing.lastPongAt = now;
     } else {
-      this.records.push({ sessionId, lastPongAt: now });
+      records.push({ sessionId, lastPongAt: now });
     }
-    this.flush();
+    this.flush(records);
   }
 
   lastPongAt(sessionId: string): number | null {
-    return this.records.find((r) => r.sessionId === sessionId)?.lastPongAt ?? null;
+    return this.read().find((r) => r.sessionId === sessionId)?.lastPongAt ?? null;
   }
 }
 
