@@ -100,6 +100,11 @@ export type Heartbeat = {
   nextPingAt: number;
   lastPingAt: number | null;
   escalated: boolean;
+  /** Consecutive missed pongs (ping fired, no fresh pong followed). A single
+   *  miss is normal — a long working turn spans one interval without ending a
+   *  turn, so no pong lands even though the channel is fine. Escalation waits
+   *  for 2+ so it means "genuinely unanswered", not "agent is mid-task". */
+  missedPings: number;
 };
 
 /**
@@ -133,6 +138,7 @@ export class HeartbeatStore {
       nextPingAt: Date.now() + intervalMs,
       lastPingAt: null,
       escalated: false,
+      missedPings: 0,
     };
     this.heartbeats.push(hb);
     this.flush();
@@ -163,11 +169,12 @@ export class HeartbeatStore {
   /** Records that a ping just went out, and whether it was the escalated
    *  (urgent) prompt or the normal one — read back by the next tick's
    *  pong-freshness check in index.ts's deliverHeartbeat. */
-  markPinged(conversationId: string, escalated: boolean): void {
+  markPinged(conversationId: string, escalated: boolean, missedPings: number): void {
     const hb = this.heartbeats.find((h) => h.conversationId === conversationId);
     if (!hb) return;
     hb.lastPingAt = Date.now();
     hb.escalated = escalated;
+    hb.missedPings = missedPings;
     this.flush();
   }
 }
