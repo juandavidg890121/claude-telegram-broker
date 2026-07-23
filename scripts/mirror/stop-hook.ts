@@ -19,12 +19,22 @@
  *   "Stop": [{ "hooks": [{ "type": "command", "command":
  *     "<repo>/node_modules/.bin/tsx --env-file-if-exists=<repo>/.env <repo>/scripts/mirror/stop-hook.ts" }] }]
  */
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { chunkify } from '../../src/chunk.js';
 import { findWatched } from '../../src/broker-state.js';
 import { heartbeatFresh } from '../../src/mirror.js';
 import { armInstruction } from '../../src/watch-arm.js';
 import { quotaSuffix, checkAlert } from '../../src/quota.js';
 import { readStdin, target, send, notify } from '../../src/hook-telegram.js';
+import { PongStore } from '../../src/heartbeat.js';
+
+// Not imported from src/config.js: config.ts's module load throws unless the
+// broker's full startup contract (TELEGRAM_ALLOWED_USERS, etc.) is satisfied
+// — see hook-telegram.ts's own file-header comment for why every hook grows
+// its own copy of the couple of things it actually needs instead of pulling
+// that in. Same env var and default index.ts's config.pongFile resolves to.
+const pongFile = process.env.BROKER_PONG_FILE ?? join(homedir(), '.claude-telegram-broker-pong.json');
 
 async function main(): Promise<void> {
   const payload = JSON.parse(await readStdin()) as {
@@ -39,7 +49,7 @@ async function main(): Promise<void> {
   const entry = findWatched(sessionId);
   if (!entry) return; // Not watched: no mirroring, no arming, no noise.
 
-  await mirrorReply(entry.conversationId, payload.last_assistant_message?.trim());
+  await mirrorReply(entry.conversationId, sessionId, payload.last_assistant_message?.trim());
 
   await mirrorAlert(entry.conversationId);
 
@@ -56,7 +66,7 @@ async function main(): Promise<void> {
   }
 }
 
-async function mirrorReply(conversationId: string, text: string | undefined): Promise<void> {
+async function mirrorReply(conversationId: string, sessionId: string, text: string | undefined): Promise<void> {
   // The hook input already carries the reply text, so there is no transcript to
   // open and parse. The SDK documents this field as existing precisely for that.
   if (!text) return;
@@ -85,14 +95,22 @@ async function mirrorReply(conversationId: string, text: string | undefined): Pr
   const suffix = await quotaSuffix();
   if (suffix && chunks.length > 0) chunks[chunks.length - 1] += suffix;
 
+  // Tracks whether ANY chunk actually reached Telegram — a heartbeat pong
+  // (src/heartbeat.ts) is only recorded on real success, not merely on
+  // having tried. A multi-chunk message could partially fail; even one
+  // successful chunk is real evidence the mirror pipeline works.
+  let sentOk = false;
   for (const chunk of chunks) {
     try {
       await send(token, chatId, threadId, chunk);
+      sentOk = true;
     } catch (error) {
       // Best-effort: a Telegram hiccup must never fail the real session's turn.
       console.error(`[stop-hook] ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+
+  if (sentOk) new PongStore(pongFile).recordPong(sessionId);
 }
 
 /**

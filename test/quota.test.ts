@@ -1,12 +1,10 @@
 /**
  * The quota decoration, tested where it can actually be wrong.
  *
- * Three things here have teeth. The hysteresis has memory, so it is the one
+ * Two things here have teeth. The hysteresis has memory, so it is the one
  * part that can be wrong for hours before anyone notices — a missed reset means
  * the 90% warning never fires again, silently, and the failure looks exactly
- * like "we just haven't hit 90% since". The block decision can swallow a
- * message the API would have served, which is the exact silence it exists to
- * fix, so it has to fail open in every direction. And the file paths must follow
+ * like "we just haven't hit 90% since". And the file paths must follow
  * BROKER_MIRROR_DIR, because a hardcoded home path writes to a directory nobody
  * promised exists.
  *
@@ -24,7 +22,7 @@ import { beforeEach, describe, it } from 'node:test';
 const root = join(mkdtempSync(join(tmpdir(), 'quota-')), 'mirror');
 process.env.BROKER_MIRROR_DIR = root;
 
-const { parseQuota, fresh, decideAlert, quotaLine, checkAlert, checkBlocked, blockedWindow, blockedMessage, resetPhrase, usable } =
+const { parseQuota, fresh, decideAlert, quotaLine, checkAlert, resetPhrase, usable } =
   await import('../src/quota.js');
 type Quota = Awaited<ReturnType<typeof parseQuota>>;
 
@@ -239,84 +237,6 @@ describe('resetPhrase', () => {
     // A reset already in the past would otherwise render "en -12min", which
     // reads as a bug in the broker rather than as a stale reading.
     assert.match(resetPhrase(NOW / 1000 - 720, NOW), /\(in 0min\)$/);
-  });
-});
-
-describe('blockedWindow', () => {
-  it('lets everything through while both windows are allowed', () => {
-    assert.equal(blockedWindow(quota(99, 99), NOW), undefined);
-  });
-
-  it('blocks on the API status, not on the rounded percentage', () => {
-    // 99.6% utilization prints as 100 and still serves requests. Believing the
-    // percentage over the status would refuse messages the API would have run.
-    assert.equal(blockedWindow(quota(100, 10), NOW), undefined);
-
-    const blocked = blockedWindow(quota(100, 10, { five_h_status: 'rejected' }), NOW);
-    assert.equal(blocked?.label, '5h');
-    assert.equal(blocked?.reset, RESET);
-  });
-
-  it('falls back to the percentage when the status header is missing', () => {
-    assert.equal(blockedWindow(quota(100, 10, { five_h_status: null }), NOW)?.label, '5h');
-    assert.equal(blockedWindow(quota(99, 10, { five_h_status: null }), NOW), undefined);
-  });
-
-  it('finds the weekly window too', () => {
-    assert.equal(blockedWindow(quota(10, 100, { seven_d_status: 'rejected' }), NOW)?.label, '7d');
-  });
-
-  it('ignores a block whose reset has already passed', () => {
-    // A reading lives in the cache for 5 minutes, which is long enough to
-    // outlive the reset it describes. Holding messages back for those minutes
-    // would recreate the exact silence this feature exists to remove.
-    const stale = quota(100, 10, { five_h_status: 'rejected', five_h_reset: NOW / 1000 - 60 });
-    assert.equal(blockedWindow(stale, NOW), undefined);
-  });
-});
-
-describe('checkBlocked', () => {
-  it('hands back the window that is refusing work', async () => {
-    seedCache(100, 40, { five_h_status: 'rejected', five_h_reset: Date.now() / 1000 + 5_400 });
-    const window = await checkBlocked();
-    assert.equal(window?.label, '5h');
-    assert.equal(window?.pct, 100);
-  });
-
-  it('says nothing when there is quota left', async () => {
-    seedCache(40, 40, { five_h_status: 'allowed', seven_d_status: 'allowed' });
-    assert.equal(await checkBlocked(), undefined);
-  });
-
-  it('fails open on a half reading', async () => {
-    // Blocking on a reading we do not trust would swallow the message *and*
-    // explain it with a percentage we never actually read.
-    seedCache(100, null, { five_h_status: 'rejected' });
-    assert.equal(await checkBlocked(), undefined);
-  });
-
-  it('reads a legacy cache without the new fields rather than throwing', async () => {
-    // The cache on disk at upgrade time has no status or reset keys at all.
-    seedCache(40, 40);
-    assert.equal(await checkBlocked(), undefined);
-  });
-});
-
-describe('blockedMessage', () => {
-  const window = { label: '5h', pct: 100, reset: RESET, status: 'rejected' };
-
-  it('lets the caller say what the outage means for them', () => {
-    // The same reading stops a message someone just typed and a loop that fired
-    // on a timer, and "your message was not sent" is plainly untrue of the
-    // second — which is why the sentence is not baked in here.
-    assert.equal(
-      blockedMessage(window, 'Your message was not sent.', NOW),
-      `🛑 5h quota is used up (100%). Your message was not sent.\nIt resets ${at()}.`,
-    );
-    assert.equal(
-      blockedMessage(window, "Loop a1 couldn't fire.", NOW),
-      `🛑 5h quota is used up (100%). Loop a1 couldn't fire.\nIt resets ${at()}.`,
-    );
   });
 });
 

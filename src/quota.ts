@@ -218,51 +218,6 @@ export function decideAlert(
   return { message: lines.length ? `⚠️ ${lines.join('\n⚠️ ')}` : undefined, state: next };
 }
 
-/**
- * The window that is actually refusing work, if any.
- *
- * `status` is the API's own verdict and outranks the percentage: utilization is
- * rounded for display, so 99.6% prints as "100%" while requests still go
- * through. Only when the header is missing does the percentage decide.
- *
- * A reading is cached for up to 5 minutes, which is long enough to outlive the
- * reset it describes -- so a blocked window whose reset time has already passed
- * is treated as recovered. Wrongly blocking a message the API would have served
- * is the worse of the two failures: it is silence the user cannot appeal.
- */
-export function blockedWindow(quota: Reading, now: number = Date.now()): QuotaWindow | undefined {
-  return windows(quota).find((window) => {
-    const blocked = window.status ? window.status !== 'allowed' : window.pct >= 100;
-    return blocked && (window.reset === null || window.reset * 1000 > now);
-  });
-}
-
-/**
- * `consequence` is the caller's, not this module's: the same reading stops a
- * message someone just typed and a loop that fired on a timer, and "your message
- * was not sent" is plainly untrue of the second.
- */
-export function blockedMessage(window: QuotaWindow, consequence: string, now: number = Date.now()): string {
-  return `🛑 ${window.label} quota is used up (${window.pct}%). ${consequence}\nIt resets ${resetPhrase(window.reset, now)}.`;
-}
-
-/**
- * The window refusing work right now, or undefined to carry on.
- *
- * Hands back the window rather than a finished sentence so the caller can say
- * what it means for *them* -- see blockedMessage.
- *
- * Fails open like everything else here: an unreadable cache, a dead network or
- * a half reading all mean "let the message through". Silence is the bug being
- * fixed -- swallowing messages because the quota check itself broke would just
- * move it.
- */
-export async function checkBlocked(): Promise<QuotaWindow | undefined> {
-  const quota = await getQuota();
-  if (!usable(quota)) return undefined;
-  return blockedWindow(quota);
-}
-
 export async function checkAlert(): Promise<string | undefined> {
   const quota = await getQuota();
   if (!usable(quota)) return undefined;

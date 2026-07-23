@@ -132,14 +132,13 @@ export class LoopStore {
 
 /** How a fire ended. Kept here rather than in index.ts because it is what
  *  LoopComplaints remembers, and the memory is this file's. */
-export type LoopOutcome = 'delivered' | 'not-listening' | 'no-quota';
+export type LoopOutcome = 'delivered' | 'not-listening';
 
 /**
  * Which loops have already said they can't deliver, so they say it once.
  *
  * A loop pointed at a watched session that has since been closed cannot fire,
- * and it will go on not firing until you reopen it — same for one firing into an
- * account with no quota left. Reporting that on every
+ * and it will go on not firing until you reopen it. Reporting that on every
  * pass means a wall of text every 30 minutes for as long as the loop lives —
  * which is how a topic becomes something you swipe away without reading, taking
  * the messages that did matter with it. Report the first miss, then go quiet

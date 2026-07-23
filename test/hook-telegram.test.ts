@@ -66,6 +66,51 @@ describe('send', () => {
     // names the actual problem.
     await assert.rejects(() => send('T', '-100', undefined, 'hi'), /400.*chat not found/);
   });
+
+  it('does not retry a 4xx -- Telegram would reject it identically again', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response('Bad Request: chat not found', { status: 400 });
+    }) as unknown as typeof fetch;
+
+    await assert.rejects(() => send('T', '-100', undefined, 'hi'));
+    assert.equal(calls, 1);
+  });
+
+  it('retries once on a 5xx and succeeds if the retry lands', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return calls === 1 ? new Response('nope', { status: 502 }) : new Response('{"ok":true}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await send('T', '-100', undefined, 'hi');
+    assert.equal(calls, 2);
+  });
+
+  it('retries once on a network-level throw and succeeds if the retry lands', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('ECONNRESET');
+      return new Response('{"ok":true}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await send('T', '-100', undefined, 'hi');
+    assert.equal(calls, 2);
+  });
+
+  it('gives up after a network throw followed by a second failure', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      throw new Error('ECONNRESET');
+    }) as unknown as typeof fetch;
+
+    await assert.rejects(() => send('T', '-100', undefined, 'hi'), /ECONNRESET/);
+    assert.equal(calls, 2);
+  });
 });
 
 describe('notify', () => {
@@ -85,14 +130,31 @@ describe('notify', () => {
     await assert.doesNotReject(() => notify('-100:42', 'T', 'hi', 'test-hook'));
   });
 
-  it('keeps sending the rest after one chunk fails', async () => {
+  it('retries a transient failure on page one before moving to page two', async () => {
+    let call = 0;
+    const texts: string[] = [];
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      call += 1;
+      texts.push(JSON.parse(init.body).text);
+      // send()'s own retry absorbs this -- a transient failure on page one
+      // must not silently truncate the message.
+      return call === 1 ? new Response('nope', { status: 500 }) : new Response('{"ok":true}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await notify('-100:42', 'T', 'y'.repeat(MAX_LEN + 500), 'test-hook');
+    assert.equal(call, 3, 'page one: fail then retry, page two: one call');
+    assert.equal(texts[0], texts[1], 'the retry resends the same page that failed');
+  });
+
+  it('keeps sending the rest after one chunk fails permanently', async () => {
     let call = 0;
     const calls: string[] = [];
     globalThis.fetch = (async (_url: string, init: { body: string }) => {
       calls.push(JSON.parse(init.body).text);
       call += 1;
-      // A transient failure on page one must not silently truncate the message.
-      return call === 1 ? new Response('nope', { status: 500 }) : new Response('{"ok":true}', { status: 200 });
+      // A 4xx is not retried by send() itself, so this exercises notify's own
+      // catch-and-continue: page two must still go out.
+      return call === 1 ? new Response('nope', { status: 400 }) : new Response('{"ok":true}', { status: 200 });
     }) as unknown as typeof fetch;
 
     await notify('-100:42', 'T', 'y'.repeat(MAX_LEN + 500), 'test-hook');

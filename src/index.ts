@@ -16,12 +16,23 @@ import { TelegramFrontend } from './telegram.js';
 import { heartbeatFresh, writeInboxMessage } from './mirror.js';
 import { startAskWatcher } from './asks.js';
 import { renderPreview } from './preview.js';
-import { blockedMessage, checkAlert, checkBlocked, type QuotaWindow } from './quota.js';
+import { checkAlert } from './quota.js';
 import { LoopComplaints, LoopStore, formatDuration, parseDuration, startLoopScheduler, type Loop } from './loops.js';
+import {
+  HeartbeatStore,
+  HEARTBEAT_ESCALATED_PROMPT,
+  HEARTBEAT_PING_PROMPT,
+  PongStore,
+  parseHeartbeatInterval,
+  startHeartbeatScheduler,
+  type Heartbeat,
+} from './heartbeat.js';
 import type { Frontend, Inbound } from './frontend.js';
 
 const registry = new Registry(config.stateFile);
 const loops = new LoopStore(config.loopsFile);
+const heartbeats = new HeartbeatStore(config.heartbeatsFile);
+const pongs = new PongStore(config.pongFile);
 const frontend: Frontend = new TelegramFrontend();
 
 const sessions = new SessionManager({
@@ -93,6 +104,11 @@ frontend.onCommand('help', async (msg) => {
       '/loops — list this conversation’s scheduled loops',
       '/unloop <id> — cancel a loop',
       '/reloop <id> <interval> <prompt…> — replace a loop’s interval and prompt',
+      '/heartbeat <interval> — periodically verify Telegram mirroring is alive,',
+      '    e.g. /heartbeat 30m. Minimum 5m. Escalates to an urgent in-session',
+      '    prompt if a ping goes unanswered.',
+      '/heartbeats — show this conversation’s heartbeat, if any',
+      '/unheartbeat — turn it off',
       '/mode [name] — show or change this session’s permission mode',
       '/stop — end this session (the transcript survives; the next message resumes it)',
       '/interrupt — stop what Claude is doing right now',
@@ -547,33 +563,26 @@ frontend.onCommand('stop', async (msg) => {
 
 /** Whether a prompt reached the session, and if not, why — the caller decides
  *  what that is worth saying, because the answer differs for a person who just
- *  typed and a timer that fired. `no-quota` carries the window it read, because
- *  that reading is gone by the time the caller reacts and asking again would
- *  answer about a different minute. */
-type Delivery = { status: 'delivered' | 'not-listening' } | { status: 'no-quota'; window: QuotaWindow };
+ *  typed and a timer that fired.
+ *
+ *  Deliberately does not check quota first. A message pushed into a session
+ *  with no quota left is answered by nothing at all — the turn dies wherever
+ *  it dies and the topic stays quiet — but that is the account's own limit
+ *  playing out, not this broker's decision to make on the user's behalf.
+ *  Refusing to even try was a worse failure than the silence it was meant to
+ *  explain: it stopped every message, not just the ones that would truly have
+ *  failed, on nothing firmer than a rounded percentage or a status string this
+ *  broker does not fully control the meaning of. checkAlert (see quota.ts)
+ *  still surfaces a warning near the limit — this just no longer acts on it. */
+type Delivery = { status: 'delivered' | 'not-listening' };
 
 /**
  * Deliver text into a conversation exactly as if the user had typed it —
  * watched-session inbox routing or driving a broker-owned session directly. The
  * single path both a real inbound Telegram message and a due /loop prompt go
  * through, so a loop is indistinguishable from having typed it yourself.
- *
- * It reports rather than announces. The refusal below used to be sent from
- * here, which was right for the only caller it had: a person who typed. When a
- * loop started calling it too, that same paragraph went out on every fire,
- * forever, to a topic whose session had simply been closed.
  */
 async function deliverMessage(conversationId: string, text: string): Promise<Delivery> {
-  // Checked before delivering, not after: text pushed into a session with no
-  // quota left is answered by nothing at all — the turn dies wherever it dies
-  // and the topic simply stays quiet. Refusing here is the difference between
-  // "the broker is broken" and "you are out of quota until 4:10 PM".
-  //
-  // Above the watch split because both sides spend the same quota: a watched
-  // session runs in someone's VS Code, but it bills to the same account.
-  const blocked = await checkBlocked();
-  if (blocked) return { status: 'no-quota', window: blocked };
-
   const entry =
     registry.get(conversationId) ?? sessions.register(conversationId, config.defaultCwd, 'default');
 
@@ -595,13 +604,6 @@ async function deliverMessage(conversationId: string, text: string): Promise<Del
 frontend.onMessage(async (msg: Inbound) => {
   const outcome = await deliverMessage(msg.conversationId, msg.text);
   if (outcome.status === 'delivered') return;
-
-  // Every fire, unlike the loop below: a person who just typed is owed an answer
-  // to the message they typed, and "you are out of quota" is that answer.
-  if (outcome.status === 'no-quota') {
-    await frontend.sendText(msg.conversationId, blockedMessage(outcome.window, 'Your message was not sent.'));
-    return;
-  }
 
   const entry = registry.get(msg.conversationId);
   // Name all three ways back. The commonest cause is a closed VS Code window —
@@ -652,20 +654,6 @@ async function deliverLoop(loop: Loop): Promise<void> {
   const outcome = await deliverMessage(loop.conversationId, loop.prompt);
   if (!complaints.shouldReport(loop.id, outcome.status)) return;
 
-  // Muted after the first one, like the not-listening case and for the same
-  // reason: a 30m loop against a 5-hour window would otherwise post the same
-  // refusal ten times, each with a countdown one interval shorter than the last.
-  // The loop is not broken and needs no action, so it says so once.
-  if (outcome.status === 'no-quota') {
-    await frontend.sendText(
-      loop.conversationId,
-      `${blockedMessage(outcome.window, `Loop ${loop.id} couldn't fire.`)}\n` +
-        `It keeps trying every ${formatDuration(loop.intervalMs)} and will say nothing more until it lands; ` +
-        `/unloop ${loop.id} to stop it.`,
-    );
-    return;
-  }
-
   await frontend.sendText(
     loop.conversationId,
     `🔁 Loop ${loop.id} couldn't fire — nothing is listening in this watched session. ` +
@@ -673,6 +661,66 @@ async function deliverLoop(loop: Loop): Promise<void> {
       `/unloop ${loop.id} to stop it.`,
   );
 }
+
+/**
+ * A due heartbeat, delivered with the same skip-while-working judgement
+ * deliverLoop makes, plus the freshness check this feature exists for.
+ *
+ * Freshness: has a pong landed since the LAST ping this heartbeat sent? If
+ * hb.lastPingAt is null (first ping ever) there is nothing to check yet —
+ * ping normally. Otherwise compare pongs.lastPongAt(sessionId) against
+ * hb.lastPingAt: a pong strictly after the last ping means that ping's turn
+ * produced a real successful mirror, so the channel is alive. A missing or
+ * stale pong means the last ping went unanswered — escalate.
+ */
+async function deliverHeartbeat(hb: Heartbeat): Promise<void> {
+  if (sessions.isWorking(hb.conversationId)) {
+    console.log(`[heartbeat] ${hb.conversationId} skipped: still working on the last one`);
+    return;
+  }
+
+  const entry = registry.get(hb.conversationId);
+  const sessionId = entry?.sessionId;
+
+  let escalate = false;
+  let missedPings = 0;
+  if (hb.lastPingAt !== null && sessionId) {
+    const lastPong = pongs.lastPongAt(sessionId);
+    const pongStale = lastPong === null || lastPong <= hb.lastPingAt;
+    // Tolerate a single missed pong: a long working turn legitimately spans one
+    // ping interval without ending a turn, so no fresh pong lands even though
+    // the channel is fine. Escalate only on 2+ CONSECUTIVE misses — genuinely
+    // unanswered, not just mid-task. Any fresh pong resets the counter to 0.
+    missedPings = pongStale ? (hb.missedPings ?? 0) + 1 : 0;
+    escalate = missedPings >= 2;
+  }
+
+  const prompt = escalate ? HEARTBEAT_ESCALATED_PROMPT : HEARTBEAT_PING_PROMPT;
+  const outcome = await deliverMessage(hb.conversationId, prompt);
+  heartbeats.markPinged(hb.conversationId, escalate, missedPings);
+
+  // Delivery-failure reporting mirrors deliverLoop exactly (report once via
+  // the shared LoopComplaints instance, keyed by conversationId since there
+  // is only one heartbeat per conversation — no id to disambiguate several,
+  // unlike a loop). The escalated PROMPT ITSELF (sent to Claude, inside the
+  // session) is unrelated to this — this block is only about telling the
+  // Telegram user the ping couldn't even be delivered at all (nothing is
+  // listening in the session), which needs the same "say it once" treatment
+  // a loop's delivery failure gets. Delivery's status is only ever
+  // 'delivered' | 'not-listening' (see the type above) — quota no longer
+  // blocks delivery at all.
+  if (outcome.status === 'delivered') return;
+  if (!complaints.shouldReport(`heartbeat:${hb.conversationId}`, outcome.status)) return;
+
+  await frontend.sendText(
+    hb.conversationId,
+    `💓 Heartbeat couldn't ping — nothing is listening in this watched session. ` +
+      `It keeps trying every ${formatDuration(hb.intervalMs)} and will say nothing more until it lands; ` +
+      `/unheartbeat to stop it.`,
+  );
+}
+
+const heartbeatScheduler = startHeartbeatScheduler(heartbeats, deliverHeartbeat);
 
 const loopScheduler = startLoopScheduler(loops, deliverLoop);
 
@@ -746,11 +794,49 @@ frontend.onCommand('reloop', async (msg, args) => {
   );
 });
 
+/**
+ * `/heartbeat <interval>` — periodically verify this conversation's Stop-hook
+ * mirror is alive; escalates to an urgent in-session prompt on a miss.
+ */
+frontend.onCommand('heartbeat', async (msg, args) => {
+  const intervalText = args.trim().split(/\s+/)[0] ?? '';
+  if (!intervalText) {
+    throw new Error('/heartbeat <interval> — e.g. /heartbeat 30m. Minimum 5m.\nManage it: /heartbeats, /unheartbeat');
+  }
+  const intervalMs = parseHeartbeatInterval(intervalText);
+  heartbeats.enable(msg.conversationId, intervalMs);
+  await frontend.sendText(
+    msg.conversationId,
+    `💓 Heartbeat set — checking every ${formatDuration(intervalMs)}, first check in ${formatDuration(intervalMs)}.\n/unheartbeat to cancel.`,
+  );
+});
+
+frontend.onCommand('heartbeats', async (msg) => {
+  const hb = heartbeats.get(msg.conversationId);
+  if (!hb) {
+    await frontend.sendText(msg.conversationId, 'No heartbeat in this conversation. /heartbeat <interval> to add one.');
+    return;
+  }
+  const inMs = hb.nextPingAt - Date.now();
+  const nextIn = inMs > 0 ? `next in ${formatDuration(inMs)}` : 'due now';
+  const status = hb.escalated ? '⚠️ escalated — last ping went unanswered' : '✅ healthy';
+  await frontend.sendText(msg.conversationId, `💓 every ${formatDuration(hb.intervalMs)} (${nextIn}) — ${status}`);
+});
+
+frontend.onCommand('unheartbeat', async (msg) => {
+  if (!heartbeats.disable(msg.conversationId)) {
+    throw new Error('No heartbeat in this conversation. /heartbeat <interval> to add one.');
+  }
+  complaints.forget(`heartbeat:${msg.conversationId}`);
+  await frontend.sendText(msg.conversationId, '🛑 Heartbeat cancelled.');
+});
+
 async function shutdown(): Promise<void> {
   console.log('\n[broker] shutting down…');
   // Before stopAll: a tick landing mid-shutdown would push a prompt into a
   // session being torn down.
   clearInterval(loopScheduler);
+  clearInterval(heartbeatScheduler);
   // Same reason, plus one of its own: the heartbeat stops here, so a hook that
   // asks during shutdown sees a dead broker and falls through to its session
   // immediately rather than waiting out a deadline nobody is left to meet.

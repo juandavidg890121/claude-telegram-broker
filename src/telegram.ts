@@ -373,7 +373,9 @@ export class TelegramFrontend implements Frontend {
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       console.error(`[telegram] handler failed: ${reason}`);
-      await this.sendText(msg.conversationId, `⚠️ ${reason}`).catch(() => {});
+      await this.sendText(msg.conversationId, `⚠️ ${reason}`).catch((sendError) =>
+        console.error(`[telegram] failed to relay error to chat: ${sendError instanceof Error ? sendError.message : String(sendError)}`),
+      );
     }
   }
 
@@ -425,7 +427,9 @@ export class TelegramFrontend implements Frontend {
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       console.error(`[telegram] photo handler failed: ${reason}`);
-      await this.sendText(msg.conversationId, `⚠️ Couldn't process that photo: ${reason}`).catch(() => {});
+      await this.sendText(msg.conversationId, `⚠️ Couldn't process that photo: ${reason}`).catch((sendError) =>
+        console.error(`[telegram] failed to relay error to chat: ${sendError instanceof Error ? sendError.message : String(sendError)}`),
+      );
     }
   }
 
@@ -517,7 +521,9 @@ export class TelegramFrontend implements Frontend {
       // here — downloading, echoing and the handler itself all fail into this
       // catch, and blaming transcription sends you off to debug whisper when
       // whisper worked fine.
-      await this.sendText(conversationId, `⚠️ Voice note failed: ${reason}`).catch(() => {});
+      await this.sendText(conversationId, `⚠️ Voice note failed: ${reason}`).catch((sendError) =>
+        console.error(`[telegram] failed to relay error to chat: ${sendError instanceof Error ? sendError.message : String(sendError)}`),
+      );
     }
   }
 
