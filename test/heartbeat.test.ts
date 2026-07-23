@@ -157,14 +157,24 @@ describe('HeartbeatStore', () => {
     assert.equal(store.takeDue(Date.now() + 10 * 60_000 + 1_000).length, 0, 'rescheduled, not due again immediately');
   });
 
-  it('markPinged records lastPingAt and the escalation flag', () => {
+  it('markPinged records lastPingAt, the escalation flag, and missedPings', () => {
     const store = new HeartbeatStore(join(dir, 'hb-g.json'));
     store.enable('-100:1', 10 * 60_000);
     const before = Date.now();
-    store.markPinged('-100:1', true);
+    store.markPinged('-100:1', true, 2);
     const hb = store.get('-100:1');
     assert.ok((hb?.lastPingAt ?? 0) >= before);
     assert.equal(hb?.escalated, true);
+    assert.equal(hb?.missedPings, 2);
+  });
+
+  it('enable() starts missedPings at 0 and it round-trips through the file', () => {
+    const file = join(dir, 'hb-missed.json');
+    const store = new HeartbeatStore(file);
+    store.enable('-100:1', 10 * 60_000);
+    assert.equal(store.get('-100:1')?.missedPings, 0);
+    store.markPinged('-100:1', false, 1);
+    assert.equal(new HeartbeatStore(file).get('-100:1')?.missedPings, 1);
   });
 
   it('reads a corrupt file as empty rather than crashing', () => {
